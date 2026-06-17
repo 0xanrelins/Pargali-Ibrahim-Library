@@ -26,6 +26,12 @@ Binance WS  →  raw/ (JSONL)  →  data/ (Parquet)  →  DuckDB catalog
 
 Live Grafana dashboards (local OSS at `:3001`, folder **Market Data Platform**):
 
+### Dashboard folder
+
+All eight provisioned dashboards in one folder — Overview, Collector, Pipeline, Storage, Coverage, Quality, Catalog, and AI Layer.
+
+![Grafana dashboard folder](docs/screenshots/dashboard-folder.png)
+
 ### Collector Health
 
 WebSocket exporter status, active streams, throughput, buffer fill, and process resources.
