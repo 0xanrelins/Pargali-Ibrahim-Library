@@ -22,6 +22,30 @@ Binance WS  →  raw/ (JSONL)  →  data/ (Parquet)  →  DuckDB catalog
 
 ---
 
+## Screenshots
+
+Live Grafana dashboards (local OSS at `:3001`, folder **Market Data Platform**):
+
+### Collector Health
+
+WebSocket exporter status, active streams, throughput, buffer fill, and process resources.
+
+![Collector Health dashboard](docs/screenshots/collector-health.png)
+
+### Pipeline Health
+
+Raw flush rates, Parquet batch processing, catalog sync, and conversion failures.
+
+![Pipeline Health dashboard](docs/screenshots/pipeline-health.png)
+
+### Data Quality
+
+Per-dataset validation scores, duplicate detection, and monotonic timestamp checks.
+
+![Data Quality dashboard](docs/screenshots/data-quality.png)
+
+---
+
 ## Requirements
 
 - **Python** 3.11+ (tested on 3.14)
