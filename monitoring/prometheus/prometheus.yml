@@ -1,0 +1,18 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Phase 3 exporters (collector, pipeline, catalog) — host-side services
+  - job_name: market-data-platform
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels:
+          service: market-data-platform-collector
+      - targets: ["host.docker.internal:9101"]
+        labels:
+          service: market-data-platform-converter

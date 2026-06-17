@@ -1,0 +1,217 @@
+{
+  "uid": "mdp-metadata-catalog",
+  "title": "Market Data Platform — Metadata Catalog",
+  "tags": ["market-data-platform", "phase-3", "catalog"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "category",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(mdp_catalog_dataset_rows, category)", "refId": "A" },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": false,
+        "allValue": ".*",
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Datasets Registered",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "mdp_pipeline_catalog_datasets_discovered",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Last Catalog Sync",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "mdp_pipeline_catalog_last_sync_timestamp_seconds * 1000",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "dateTimeAsIso" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Metadata Extraction Failures",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "mdp_pipeline_catalog_metadata_extraction_failures_total",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Datasets",
+      "description": "Registered datasets from catalog sync. Full detail in catalog/catalog.duckdb.",
+      "gridPos": { "x": 0, "y": 4, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "label_join(mdp_catalog_dataset_rows{category=~\"$category\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        },
+        {
+          "expr": "label_join(mdp_catalog_dataset_files{category=~\"$category\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "refId": "B",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": { "byField": "dataset", "mode": "outer" }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "service": true,
+              "category": true,
+              "symbol": true,
+              "category 1": true,
+              "category 2": true,
+              "symbol 1": true,
+              "symbol 2": true,
+              "dataset_id": true
+            },
+            "indexByName": {
+              "dataset": 0,
+              "Rows": 1,
+              "Parquet Files": 2
+            },
+            "renameByName": {
+              "Value #A": "Rows",
+              "Value #B": "Parquet Files",
+              "dataset": "Dataset"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Rows" },
+            "properties": [{ "id": "decimals", "value": 0 }]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "Dataset", "desc": false }] }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Schema Registry",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "mdp_catalog_schema_columns{dataset_id=~\"$category:.*\"} == 1",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "service": true
+            },
+            "renameByName": {
+              "column_name": "Column",
+              "data_type": "Type",
+              "dataset_id": "Dataset ID"
+            }
+          }
+        },
+        { "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Dataset ID", "desc": false }, { "field": "Column", "desc": false }] } }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 6,
+      "type": "text",
+      "title": "DuckDB Catalog",
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 3 },
+      "options": {
+        "mode": "markdown",
+        "content": "Full catalog stored at **`catalog/catalog.duckdb`**. Query locally:\n\n```sql\nSELECT * FROM datasets;\nSELECT * FROM file_stats;\nSELECT * FROM schema_registry;\nSELECT * FROM ai_metadata;\n```\n\nAI metadata table is a stub until Section 7."
+      }
+    }
+  ],
+  "annotations": { "list": [] }
+}

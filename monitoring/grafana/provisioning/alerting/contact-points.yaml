@@ -1,0 +1,29 @@
+# Phase 3 — contact point stubs (Adım 9.3)
+# Replace addresses / webhook URL when wiring real notifications.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: mdp-alerts
+    receivers:
+      - uid: mdp-alerts-email
+        type: email
+        disableResolveMessage: false
+        settings:
+          addresses: mdp-alerts@localhost
+          singleEmail: false
+          subject: |
+            {{ template "default.title" . }}
+          message: |
+            {{ template "default.message" . }}
+
+  - orgId: 1
+    name: mdp-alerts-webhook
+    receivers:
+      - uid: mdp-alerts-webhook
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          url: http://host.docker.internal:19999/alerts
+          httpMethod: POST
+          maxAlerts: 0

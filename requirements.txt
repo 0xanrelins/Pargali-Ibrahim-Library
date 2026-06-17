@@ -1,0 +1,5 @@
+unicorn-binance-websocket-api>=2.14.0
+pandas>=2.2.0
+pyarrow>=18.0.0
+duckdb>=1.1.0
+prometheus_client>=0.21.0

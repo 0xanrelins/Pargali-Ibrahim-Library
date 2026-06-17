@@ -1,0 +1,100 @@
+# Phase 3 alerting — configurable thresholds for Grafana alert rules.
+# Consumed by monitoring/grafana/provisioning/alerting/ (Adım 9.2).
+
+defaults:
+  evaluation_interval: 1m
+  pending_period: 5m
+  keep_firing_for: 0s
+
+alerts:
+  stream_unrepairable:
+    enabled: true
+    severity: critical
+    description: UBWA reported a stream that cannot be repaired automatically.
+    pending_period: 0s
+    query_window: 5m
+    min_increase: 1
+
+  collector_disconnected:
+    enabled: true
+    severity: critical
+    description: Collector Prometheus exporter is down or unreachable.
+    pending_period: 2m
+    up_value: 1
+
+  converter_disconnected:
+    enabled: true
+    severity: critical
+    description: Pipeline/converter Prometheus exporter is down or unreachable.
+    pending_period: 2m
+    up_value: 1
+
+  buffer_near_capacity:
+    enabled: true
+    severity: warning
+    description: UBWA stream buffer is approaching its maximum capacity.
+    pending_period: 5m
+    capacity_ratio: 0.85
+
+  parquet_conversion_failed:
+    enabled: true
+    severity: warning
+    description: Parquet conversion failed in the last evaluation window.
+    pending_period: 0s
+    query_window: 15m
+    min_increase: 1
+
+  catalog_sync_stale:
+    enabled: true
+    severity: warning
+    description: Metadata catalog has not synced recently.
+    pending_period: 10m
+    max_age_seconds: 900
+
+  catalog_extraction_failed:
+    enabled: true
+    severity: warning
+    description: Catalog metadata extraction failures increased.
+    pending_period: 0s
+    query_window: 15m
+    min_increase: 1
+
+  disk_usage_high:
+    enabled: true
+    severity: warning
+    description: Disk usage on the data volume exceeded the configured threshold.
+    pending_period: 5m
+    used_percent: 85
+
+  disk_usage_critical:
+    enabled: true
+    severity: critical
+    description: Disk usage on the data volume is critically high.
+    pending_period: 2m
+    used_percent: 95
+
+  coverage_low:
+    enabled: true
+    severity: warning
+    description: Dataset coverage fell below the minimum acceptable percentage.
+    pending_period: 15m
+    min_coverage_percent: 95
+    # Liquidations are sparse; alert only applies to trades unless overridden.
+    categories:
+      - trades
+
+  schema_change_detected:
+    enabled: true
+    severity: warning
+    description: Parquet schema changed for a registered dataset.
+    pending_period: 0s
+    query_window: 15m
+    min_increase: 1
+
+notification:
+  # Provisioned in monitoring/grafana/provisioning/alerting/contact-points.yaml
+  default_contact_point: mdp-alerts
+  webhook_contact_point: mdp-alerts-webhook
+  group_by:
+    - alertname
+    - severity

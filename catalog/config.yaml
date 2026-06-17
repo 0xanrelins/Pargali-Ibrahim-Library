@@ -1,0 +1,11 @@
+# Phase 3 metadata catalog — single source of truth (DuckDB).
+# Tables are created in Section 6; no schema initialization in Adım 0.
+
+database:
+  path: catalog/catalog.duckdb
+
+paths:
+  raw: raw
+  data: data
+
+schema_version: 0

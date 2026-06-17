@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: market-data-platform
+    orgId: 1
+    folder: Market Data Platform
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards/market-data
