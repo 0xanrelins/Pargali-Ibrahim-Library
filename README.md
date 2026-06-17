@@ -38,8 +38,8 @@ No Binance API keys are required for public market streams.
 ### 1. Clone and install
 
 ```bash
-git clone git@github.com:YOUR_USER/PargalıIbrahim-Library.git
-cd PargalıIbrahim-Library
+git clone git@github.com:0xanrelins/Pargali-Ibrahim-Library.git
+cd Pargali-Ibrahim-Library
 
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
