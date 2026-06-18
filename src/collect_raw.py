@@ -18,7 +18,15 @@ from metrics.pipeline_registry import (
 )
 
 EXCHANGE = "binance.com-futures"
-TRADE_MARKETS = ["btcusdt", "solusdt", "xrpusdt", "dogeusdt"]
+TRADE_MARKETS = [
+    "btcusdt",
+    "solusdt",
+    "xrpusdt",
+    "dogeusdt",
+    "ethusdt",
+    "hypeusdt",
+    "bnbusdt",
+]
 POLL_INTERVAL_SEC = 0.01
 FLUSH_INTERVAL_SEC = 60
 REPORT_INTERVAL_SEC = 10
@@ -98,7 +106,7 @@ def setup_streams(ubwa: BinanceWebSocketApiManager) -> tuple[str, str]:
     trade_stream_id = ubwa.create_stream(
         channels="aggTrade",
         markets=TRADE_MARKETS,
-        stream_label="aggTrade-BTC-SOL-XRP-DOGE",
+        stream_label="aggTrade-7-markets",
     )
     liquidation_stream_id = ubwa.create_stream(
         channels="!forceOrder",
@@ -111,8 +119,9 @@ def setup_streams(ubwa: BinanceWebSocketApiManager) -> tuple[str, str]:
         liquidation_stream_id,
     )
     logger.info(
-        "Subscriptions: %s aggTrade + 1 !forceOrder = 5 total",
+        "Subscriptions: %s aggTrade + 1 !forceOrder = %s total",
         len(TRADE_MARKETS),
+        len(TRADE_MARKETS) + 1,
     )
     return trade_stream_id, liquidation_stream_id
 

@@ -1,67 +1,162 @@
 {
-  "uid": "mdp-data-quality",
-  "title": "Market Data Platform — Data Quality",
-  "tags": ["market-data-platform", "phase-3", "quality"],
-  "timezone": "browser",
-  "schemaVersion": 39,
-  "version": 1,
-  "refresh": "1m",
-  "time": { "from": "now-6h", "to": "now" },
-  "templating": {
+  "annotations": {
     "list": [
       {
-        "name": "category",
-        "type": "query",
-        "datasource": { "type": "prometheus", "uid": "prometheus" },
-        "query": { "query": "label_values(mdp_quality_score, category)", "refId": "A" },
-        "refresh": 2,
-        "includeAll": false,
-        "multi": false,
-        "current": { "text": "trades", "value": "trades" }
-      },
-      {
-        "name": "symbol",
-        "type": "query",
-        "datasource": { "type": "prometheus", "uid": "prometheus" },
-        "query": {
-          "query": "label_values(mdp_quality_score{category=\"$category\"}, symbol)",
-          "refId": "A"
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
         },
-        "refresh": 2,
-        "includeAll": false,
-        "multi": false,
-        "current": { "text": "BTCUSDT", "value": "BTCUSDT" }
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
       }
     ]
   },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
   "panels": [
     {
-      "id": 1,
-      "type": "table",
-      "title": "Quality Summary",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "description": "Quality score and rows validated for all datasets.",
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Quality Score"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 95
+                    },
+                    {
+                      "color": "green",
+                      "value": 99
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Rows Validated"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 15,
+        "w": 14,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Quality Score"
+          }
+        ]
+      },
+      "pluginVersion": "11.5.2",
       "targets": [
         {
           "expr": "label_join(mdp_quality_score, \"dataset\", \"/\", \"category\", \"symbol\")",
-          "refId": "A",
+          "format": "table",
           "instant": true,
           "range": false,
-          "format": "table"
+          "refId": "A"
         },
         {
           "expr": "label_join(mdp_quality_rows_validated, \"dataset\", \"/\", \"category\", \"symbol\")",
-          "refId": "B",
+          "format": "table",
           "instant": true,
           "range": false,
-          "format": "table"
+          "refId": "B"
         }
       ],
+      "title": "Quality Summary",
       "transformations": [
         {
           "id": "joinByField",
-          "options": { "byField": "dataset", "mode": "outer" }
+          "options": {
+            "byField": "dataset",
+            "mode": "outer"
+          }
         },
         {
           "id": "organize",
@@ -69,20 +164,20 @@
             "excludeByName": {
               "Time": true,
               "__name__": true,
+              "category": true,
+              "category 1": true,
+              "category 2": true,
               "instance": true,
               "job": true,
               "service": true,
-              "category": true,
               "symbol": true,
-              "category 1": true,
-              "category 2": true,
               "symbol 1": true,
               "symbol 2": true
             },
             "indexByName": {
-              "dataset": 0,
               "Quality Score": 1,
-              "Rows Validated": 2
+              "Rows Validated": 2,
+              "dataset": 0
             },
             "renameByName": {
               "Value #A": "Quality Score",
@@ -92,187 +187,83 @@
           }
         }
       ],
-      "fieldConfig": {
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "Quality Score" },
-            "properties": [
-              { "id": "unit", "value": "percent" },
-              { "id": "decimals", "value": 2 },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    { "color": "red", "value": null },
-                    { "color": "yellow", "value": 95 },
-                    { "color": "green", "value": 99 }
-                  ]
-                }
-              },
-              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "Rows Validated" },
-            "properties": [{ "id": "decimals", "value": 0 }]
-          }
-        ]
-      },
-      "options": { "showHeader": true, "sortBy": [{ "displayName": "Quality Score", "desc": false }] }
+      "type": "table"
     },
     {
-      "id": 2,
-      "type": "gauge",
-      "title": "Quality Score — $category / $symbol",
-      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "mdp_quality_score{category=\"$category\", symbol=\"$symbol\"}",
-          "refId": "A",
-          "instant": true,
-          "range": false
-        }
-      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Datasets with at least one validation failure.",
       "fieldConfig": {
         "defaults": {
-          "unit": "percent",
-          "min": 0,
-          "max": 100,
-          "decimals": 2,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "yellow", "value": 95 },
-              { "color": "green", "value": 99 }
-            ]
-          }
-        }
-      },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "Rows Validated",
-      "gridPos": { "x": 8, "y": 8, "w": 8, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "mdp_quality_rows_validated{category=\"$category\", symbol=\"$symbol\"}",
-          "refId": "A",
-          "instant": true,
-          "range": false
-        }
-      ],
-      "fieldConfig": { "defaults": { "decimals": 0 } },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Total Failures",
-      "gridPos": { "x": 16, "y": 8, "w": 8, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "sum(mdp_quality_validation_failures{category=\"$category\", symbol=\"$symbol\"})",
-          "refId": "A",
-          "instant": true,
-          "range": false
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 1 },
-              { "color": "red", "value": 100 }
-            ]
-          }
-        }
-      },
-      "options": { "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } }
-    },
-    {
-      "id": 5,
-      "type": "table",
-      "title": "Validation Failures — $category / $symbol",
-      "description": "Failure count per check for the selected dataset.",
-      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "expr": "mdp_quality_validation_failures{category=\"$category\", symbol=\"$symbol\"}",
-          "refId": "A",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "category": true,
-              "instance": true,
-              "job": true,
-              "service": true,
-              "symbol": true
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
             },
-            "renameByName": { "Value": "Failures", "check": "Check" }
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
           }
         },
-        { "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Failures", "desc": true }] } }
-      ],
-      "fieldConfig": {
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Failures" },
+            "matcher": {
+              "id": "byName",
+              "options": "Failures"
+            },
             "properties": [
-              { "id": "decimals", "value": 0 },
               {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    { "color": "green", "value": null },
-                    { "color": "yellow", "value": 1 },
-                    { "color": "red", "value": 100 }
-                  ]
-                }
-              },
-              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+                "id": "decimals",
+                "value": 0
+              }
             ]
           }
         ]
       },
-      "options": { "showHeader": true }
-    },
-    {
+      "gridPos": {
+        "h": 15,
+        "w": 7,
+        "x": 14,
+        "y": 0
+      },
       "id": 6,
-      "type": "table",
-      "title": "All Validation Failures",
-      "description": "Datasets with at least one validation failure.",
-      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
       "targets": [
         {
           "expr": "label_join(mdp_quality_validation_failures > 0, \"dataset\", \"/\", \"category\", \"symbol\")",
-          "refId": "A",
+          "format": "table",
           "instant": true,
           "range": false,
-          "format": "table"
+          "refId": "A"
         }
       ],
+      "title": "All Validation Failures",
       "transformations": [
         {
           "id": "organize",
@@ -286,21 +277,412 @@
               "service": true,
               "symbol": true
             },
-            "renameByName": { "Value": "Failures", "check": "Check", "dataset": "Dataset" }
+            "renameByName": {
+              "Value": "Failures",
+              "check": "Check",
+              "dataset": "Dataset"
+            }
           }
         },
-        { "id": "sortBy", "options": { "fields": {}, "sort": [{ "field": "Failures", "desc": true }] } }
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "desc": true,
+                "field": "Failures"
+              }
+            ]
+          }
+        }
       ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "fieldConfig": {
+        "defaults": {
+          "decimals": 2,
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 95
+              },
+              {
+                "color": "green",
+                "value": 99
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 15
+      },
+      "id": 2,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "mdp_quality_score{category=\"$category\", symbol=\"$symbol\"}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Quality Score — $category / $symbol",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 4,
+        "y": 15
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "mdp_quality_rows_validated{category=\"$category\", symbol=\"$symbol\"}",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Rows Validated",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 9,
+        "y": 15
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "sum(mdp_quality_validation_failures{category=\"$category\", symbol=\"$symbol\"})",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Total Failures",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Failure count per check for the selected dataset.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Failures" },
-            "properties": [{ "id": "decimals", "value": 0 }]
+            "matcher": {
+              "id": "byName",
+              "options": "Failures"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 100
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              }
+            ]
           }
         ]
       },
-      "options": { "showHeader": true }
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 21
+      },
+      "id": 5,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.5.2",
+      "targets": [
+        {
+          "expr": "mdp_quality_validation_failures{category=\"$category\", symbol=\"$symbol\"}",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Validation Failures — $category / $symbol",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "category": true,
+              "instance": true,
+              "job": true,
+              "service": true,
+              "symbol": true
+            },
+            "renameByName": {
+              "Value": "Failures",
+              "check": "Check"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "desc": true,
+                "field": "Failures"
+              }
+            ]
+          }
+        }
+      ],
+      "type": "table"
     }
   ],
-  "annotations": { "list": [] }
+  "preload": false,
+  "refresh": "1m",
+  "schemaVersion": 40,
+  "tags": [
+    "market-data-platform",
+    "phase-3",
+    "quality"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "trades",
+          "value": "trades"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "includeAll": false,
+        "name": "category",
+        "query": {
+          "query": "label_values(mdp_quality_score, category)",
+          "refId": "A"
+        },
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": {
+          "text": "BTCUSDT",
+          "value": "BTCUSDT"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "includeAll": false,
+        "name": "symbol",
+        "query": {
+          "query": "label_values(mdp_quality_score{category=\"$category\"}, symbol)",
+          "refId": "A"
+        },
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Market Data Platform — Data Quality",
+  "uid": "mdp-data-quality",
+  "version": 1,
+  "weekStart": ""
 }

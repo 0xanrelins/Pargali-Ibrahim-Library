@@ -12,7 +12,15 @@ from unicorn_fy import UnicornFy
 logger = logging.getLogger(__name__)
 
 EXCHANGE = "binance_futures"
-TARGET_SYMBOLS = frozenset({"BTCUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"})
+TARGET_SYMBOLS = frozenset({
+    "BTCUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ETHUSDT",
+    "HYPEUSDT",
+    "BNBUSDT",
+})
 
 EventCategory = Literal["trades", "liquidations"]
 ParsedRow = dict[str, object]

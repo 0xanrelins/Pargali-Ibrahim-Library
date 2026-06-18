@@ -10,7 +10,7 @@ Built for operators who want a reproducible local pipeline without proprietary S
 
 | Phase | Capability |
 |-------|------------|
-| **1 — Collection** | Streams agg trades and liquidations for BTC, SOL, XRP, DOGE via [UBWA](https://github.com/LUCIT-Systems-and-Development/unicorn-binance-websocket-api) into append-only JSONL under `raw/` |
+| **1 — Collection** | Streams agg trades and liquidations for BTC, SOL, XRP, DOGE, ETH, HYPE, BNB via [UBWA](https://github.com/LUCIT-Systems-and-Development/unicorn-binance-websocket-api) into append-only JSONL under `raw/` |
 | **2 — Conversion** | Parses, normalizes, and writes ZSTD-compressed Parquet under `data/` on an hourly schedule |
 | **3 — Observability** | Prometheus metrics, DuckDB metadata catalog, 8 Grafana dashboards, and 11 alert rules |
 
@@ -161,7 +161,7 @@ Open the **Market Data Platform** folder in Grafana for all dashboards.
 
 ## Data model
 
-**Symbols:** BTCUSDT, SOLUSDT, XRPUSDT, DOGEUSDT
+**Symbols:** BTCUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, ETHUSDT, HYPEUSDT, BNBUSDT
 
 **Categories:**
 
