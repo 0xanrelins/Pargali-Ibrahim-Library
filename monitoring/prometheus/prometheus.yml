@@ -16,3 +16,9 @@ scrape_configs:
       - targets: ["host.docker.internal:9101"]
         labels:
           service: market-data-platform-converter
+      - targets: ["host.docker.internal:9102"]
+        labels:
+          service: market-data-platform-orderbook
+      - targets: ["host.docker.internal:9103"]
+        labels:
+          service: market-data-platform-polymarket

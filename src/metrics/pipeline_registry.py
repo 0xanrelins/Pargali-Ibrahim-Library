@@ -57,6 +57,29 @@ parquet_failed_conversions_total = Counter(
     ["reason"],
 )
 
+parquet_raw_backlog_files = Gauge(
+    "mdp_pipeline_parquet_raw_backlog_files",
+    "Unprocessed raw JSONL files waiting for parquet conversion.",
+    ["category"],
+)
+
+# --- Raw cleanup ---
+
+raw_cleanup_files_deleted_total = Counter(
+    "mdp_pipeline_raw_cleanup_files_deleted_total",
+    "Total processed raw JSONL files deleted by cleanup.",
+)
+
+raw_cleanup_bytes_freed_total = Counter(
+    "mdp_pipeline_raw_cleanup_bytes_freed_total",
+    "Total bytes freed by raw JSONL cleanup.",
+)
+
+raw_last_cleanup_timestamp = Gauge(
+    "mdp_pipeline_raw_last_cleanup_timestamp_seconds",
+    "Unix timestamp of the last raw JSONL cleanup run.",
+)
+
 # --- Catalog sync (Section 6 — stub metrics until catalog exists) ---
 
 catalog_last_sync_timestamp = Gauge(

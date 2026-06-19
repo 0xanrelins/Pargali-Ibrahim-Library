@@ -15,6 +15,12 @@ import pyarrow.parquet as pq
 from catalog.ai_layer import ensure_dataset_ai_metadata, publish_ai_metrics
 from catalog.db import CatalogConfig, connect_catalog, load_catalog_config
 from catalog.schema import initialize_schema
+from datasets import (
+    dataset_id as build_dataset_id,
+    dataset_relative_path,
+    discover_symbol_dirs,
+    symbol_parquet_root,
+)
 from metrics.catalog_registry import (
     catalog_dataset_files,
     catalog_dataset_rows,
@@ -30,37 +36,32 @@ from metrics.pipeline_registry import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYNC_INTERVAL_SEC = 300.0
-EXCHANGE = "binance_futures"
-CATEGORIES = ("trades", "liquidations")
 
 
 @dataclass(frozen=True)
 class DatasetKey:
+    exchange: str
     category: str
     symbol: str
 
     @property
     def dataset_id(self) -> str:
-        return f"{self.category}:{EXCHANGE}:{self.symbol}"
+        return build_dataset_id(self.exchange, self.category, self.symbol)
 
     @property
     def relative_path(self) -> str:
-        return f"data/{self.category}/{EXCHANGE}/{self.symbol}"
+        return dataset_relative_path(self.exchange, self.category, self.symbol)
 
 
 def _discover_parquet_files(data_root: Path) -> dict[DatasetKey, list[Path]]:
     grouped: dict[DatasetKey, list[Path]] = {}
-    for category in CATEGORIES:
-        category_root = data_root / category / EXCHANGE
-        if not category_root.exists():
+    for exchange, category, symbol in discover_symbol_dirs(data_root):
+        symbol_root = symbol_parquet_root(data_root, exchange, category, symbol)
+        files = sorted(symbol_root.glob("*.parquet"))
+        if not files:
             continue
-        for symbol_dir in sorted(category_root.iterdir()):
-            if not symbol_dir.is_dir():
-                continue
-            key = DatasetKey(category=category, symbol=symbol_dir.name)
-            files = sorted(symbol_dir.glob("*.parquet"))
-            if files:
-                grouped[key] = files
+        key = DatasetKey(exchange=exchange, category=category, symbol=symbol)
+        grouped[key] = files
     return grouped
 
 
@@ -181,7 +182,7 @@ def sync_catalog(*, config: CatalogConfig | None = None) -> int:
                 [
                     key.dataset_id,
                     key.category,
-                    EXCHANGE,
+                    key.exchange,
                     key.symbol,
                     key.relative_path,
                 ],

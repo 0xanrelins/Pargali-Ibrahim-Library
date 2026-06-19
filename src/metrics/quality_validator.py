@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from datasets import discover_metric_datasets, symbol_parquet_root
 from metrics.quality_registry import (
     quality_rows_validated,
     quality_score,
@@ -20,7 +21,6 @@ from metrics.quality_registry import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_SCAN_INTERVAL_SEC = 300.0
-CATEGORIES = ("trades", "liquidations")
 
 TRADE_REQUIRED_COLUMNS = [
     "timestamp",
@@ -39,6 +39,69 @@ LIQUIDATION_REQUIRED_COLUMNS = [
     "avg_price",
     "quantity",
     "filled_qty",
+    "exchange",
+]
+ORDERBOOK_DIFF_REQUIRED_COLUMNS = [
+    "timestamp",
+    "event_time",
+    "transaction_time",
+    "symbol",
+    "first_update_id",
+    "final_update_id",
+    "side",
+    "price",
+    "quantity",
+    "exchange",
+]
+ORDERBOOK_SNAPSHOT_REQUIRED_COLUMNS = [
+    "timestamp",
+    "last_update_id",
+    "symbol",
+    "side",
+    "level_index",
+    "price",
+    "quantity",
+    "exchange",
+]
+PREDICTION_METADATA_REQUIRED_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "event_type",
+    "slug",
+    "condition_id",
+    "yes_token_id",
+    "no_token_id",
+    "exchange",
+]
+PREDICTION_PRICE_REQUIRED_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "asset_id",
+    "exchange",
+]
+PREDICTION_TRADE_REQUIRED_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "asset_id",
+    "price",
+    "size",
+    "exchange",
+]
+PREDICTION_ORDERBOOK_REQUIRED_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "asset_id",
+    "side",
+    "level_index",
+    "price",
+    "quantity",
+    "exchange",
+]
+PREDICTION_DERIVED_REQUIRED_COLUMNS = [
+    "timestamp",
+    "symbol",
+    "outcome",
+    "implied_prob",
     "exchange",
 ]
 
@@ -85,12 +148,113 @@ def _count_non_positive_price(frame: pd.DataFrame) -> int:
     return int((frame["price"] <= 0).sum())
 
 
+def _count_negative_quantity(frame: pd.DataFrame) -> int:
+    if frame.empty or "quantity" not in frame.columns:
+        return 0
+    return int((frame["quantity"] < 0).sum())
+
+
+def _count_negative_price(frame: pd.DataFrame) -> int:
+    if frame.empty or "price" not in frame.columns:
+        return 0
+    return int((frame["price"] < 0).sum())
+
+
+def _count_missing_final_update_id(frame: pd.DataFrame) -> int:
+    if frame.empty or "final_update_id" not in frame.columns:
+        return 0
+    return int(frame["final_update_id"].isnull().sum())
+
+
+def _count_missing_last_update_id(frame: pd.DataFrame) -> int:
+    if frame.empty or "last_update_id" not in frame.columns:
+        return 0
+    return int(frame["last_update_id"].isnull().sum())
+
+
+def _count_duplicate_diff_levels(frame: pd.DataFrame) -> int:
+    if frame.empty:
+        return 0
+    keys = ["final_update_id", "side", "price"]
+    if not all(column in frame.columns for column in keys):
+        return 0
+    duplicated = frame[keys].duplicated(keep=False)
+    return int(duplicated.sum())
+
+
+def _count_duplicate_snapshot_levels(frame: pd.DataFrame) -> int:
+    if frame.empty:
+        return 0
+    keys = ["last_update_id", "side", "level_index"]
+    if not all(column in frame.columns for column in keys):
+        return 0
+    duplicated = frame[keys].duplicated(keep=False)
+    return int(duplicated.sum())
+
+
 def _trade_null_fields(frame: pd.DataFrame) -> int:
     return _count_null_field_rows(frame, TRADE_REQUIRED_COLUMNS)
 
 
 def _liquidation_null_fields(frame: pd.DataFrame) -> int:
     return _count_null_field_rows(frame, LIQUIDATION_REQUIRED_COLUMNS)
+
+
+def _orderbook_diff_null_fields(frame: pd.DataFrame) -> int:
+    return _count_null_field_rows(frame, ORDERBOOK_DIFF_REQUIRED_COLUMNS)
+
+
+def _orderbook_snapshot_null_fields(frame: pd.DataFrame) -> int:
+    return _count_null_field_rows(frame, ORDERBOOK_SNAPSHOT_REQUIRED_COLUMNS)
+
+
+def _count_duplicate_prediction_orderbook_levels(frame: pd.DataFrame) -> int:
+    if frame.empty:
+        return 0
+    keys = ["timestamp", "asset_id", "side", "level_index"]
+    if not all(column in frame.columns for column in keys):
+        return 0
+    duplicated = frame[keys].duplicated(keep=False)
+    return int(duplicated.sum())
+
+
+def _count_implied_prob_out_of_range(frame: pd.DataFrame) -> int:
+    if frame.empty or "implied_prob" not in frame.columns:
+        return 0
+    probs = frame["implied_prob"]
+    return int(((probs < 0) | (probs > 1)).sum())
+
+
+def _count_high_yes_no_deviation(frame: pd.DataFrame) -> int:
+    if frame.empty or "yes_no_deviation" not in frame.columns:
+        return 0
+    return int((frame["yes_no_deviation"] > 0.1).sum())
+
+
+def _prediction_metadata_null_fields(frame: pd.DataFrame) -> int:
+    return _count_null_field_rows(frame, PREDICTION_METADATA_REQUIRED_COLUMNS)
+
+
+def _prediction_price_null_fields(frame: pd.DataFrame) -> int:
+    return _count_null_field_rows(frame, PREDICTION_PRICE_REQUIRED_COLUMNS)
+
+
+def _prediction_trade_null_fields(frame: pd.DataFrame) -> int:
+    return _count_null_field_rows(frame, PREDICTION_TRADE_REQUIRED_COLUMNS)
+
+
+def _prediction_orderbook_null_fields(frame: pd.DataFrame) -> int:
+    return _count_null_field_rows(frame, PREDICTION_ORDERBOOK_REQUIRED_COLUMNS)
+
+
+def _prediction_derived_null_fields(frame: pd.DataFrame) -> int:
+    return _count_null_field_rows(frame, PREDICTION_DERIVED_REQUIRED_COLUMNS)
+
+
+def _count_non_positive_trade_size(frame: pd.DataFrame) -> int:
+    if frame.empty or "size" not in frame.columns:
+        return 0
+    return int((frame["size"] <= 0).sum())
 
 
 _BUILTIN_VALIDATORS: dict[str, list[RegisteredValidator]] = {
@@ -103,6 +267,46 @@ _BUILTIN_VALIDATORS: dict[str, list[RegisteredValidator]] = {
         RegisteredValidator("positive_quantity", _count_non_positive_quantity),
         RegisteredValidator("positive_price", _count_non_positive_price),
         RegisteredValidator("null_fields", _liquidation_null_fields),
+    ],
+    "orderbook_diff": [
+        RegisteredValidator("missing_final_update_id", _count_missing_final_update_id),
+        RegisteredValidator("negative_price", _count_negative_price),
+        RegisteredValidator("negative_quantity", _count_negative_quantity),
+        RegisteredValidator("duplicates", _count_duplicate_diff_levels),
+        RegisteredValidator("null_fields", _orderbook_diff_null_fields),
+    ],
+    "orderbook_snapshots": [
+        RegisteredValidator("missing_last_update_id", _count_missing_last_update_id),
+        RegisteredValidator("negative_price", _count_negative_price),
+        RegisteredValidator("negative_quantity", _count_negative_quantity),
+        RegisteredValidator("duplicates", _count_duplicate_snapshot_levels),
+        RegisteredValidator("null_fields", _orderbook_snapshot_null_fields),
+    ],
+    "prediction_metadata": [
+        RegisteredValidator("null_fields", _prediction_metadata_null_fields),
+    ],
+    "prediction_price": [
+        RegisteredValidator("monotonic_timestamps", _count_monotonic_timestamp_violations),
+        RegisteredValidator("null_fields", _prediction_price_null_fields),
+    ],
+    "prediction_trades": [
+        RegisteredValidator("monotonic_timestamps", _count_monotonic_timestamp_violations),
+        RegisteredValidator("positive_price", _count_non_positive_price),
+        RegisteredValidator("positive_size", _count_non_positive_trade_size),
+        RegisteredValidator("null_fields", _prediction_trade_null_fields),
+    ],
+    "prediction_orderbook": [
+        RegisteredValidator("monotonic_timestamps", _count_monotonic_timestamp_violations),
+        RegisteredValidator("negative_price", _count_negative_price),
+        RegisteredValidator("negative_quantity", _count_negative_quantity),
+        RegisteredValidator("duplicates", _count_duplicate_prediction_orderbook_levels),
+        RegisteredValidator("null_fields", _prediction_orderbook_null_fields),
+    ],
+    "prediction_derived": [
+        RegisteredValidator("monotonic_timestamps", _count_monotonic_timestamp_violations),
+        RegisteredValidator("implied_prob_range", _count_implied_prob_out_of_range),
+        RegisteredValidator("yes_no_deviation", _count_high_yes_no_deviation),
+        RegisteredValidator("null_fields", _prediction_derived_null_fields),
     ],
 }
 
@@ -128,16 +332,8 @@ def validators_for_category(category: str) -> list[RegisteredValidator]:
     ]
 
 
-def _discover_datasets(data_root: Path) -> list[tuple[str, str]]:
-    datasets: list[tuple[str, str]] = []
-    for category in CATEGORIES:
-        category_root = data_root / category / "binance_futures"
-        if not category_root.exists():
-            continue
-        for symbol_dir in sorted(category_root.iterdir()):
-            if symbol_dir.is_dir():
-                datasets.append((category, symbol_dir.name))
-    return datasets
+def _discover_datasets(data_root: Path) -> list[tuple[str, str, str]]:
+    return discover_metric_datasets(data_root)
 
 
 def _read_parquet(path: Path) -> pd.DataFrame | None:
@@ -150,10 +346,11 @@ def _read_parquet(path: Path) -> pd.DataFrame | None:
 
 def _validate_dataset(
     data_root: Path,
+    exchange: str,
     category: str,
     symbol: str,
 ) -> tuple[int, dict[str, int]]:
-    symbol_root = data_root / category / "binance_futures" / symbol
+    symbol_root = symbol_parquet_root(data_root, exchange, category, symbol)
     if not symbol_root.exists():
         return 0, {}
 
@@ -198,9 +395,9 @@ def collect_quality_metrics(*, data_root: Path) -> None:
     current_datasets: set[tuple[str, str]] = set()
     current_checks: set[tuple[str, str, str]] = set()
 
-    for category, symbol in _discover_datasets(data_root):
+    for exchange, category, symbol in _discover_datasets(data_root):
         current_datasets.add((category, symbol))
-        total_rows, failure_counts = _validate_dataset(data_root, category, symbol)
+        total_rows, failure_counts = _validate_dataset(data_root, exchange, category, symbol)
 
         if total_rows == 0:
             _zero_dataset_metrics(category, symbol)

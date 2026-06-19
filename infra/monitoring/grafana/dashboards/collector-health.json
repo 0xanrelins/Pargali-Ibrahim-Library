@@ -85,7 +85,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_up",
+          "expr": "mdp_up{service=\"market-data-platform-collector\"}",
           "refId": "A"
         }
       ],
@@ -147,7 +147,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_active_streams",
+          "expr": "mdp_ubwa_active_streams{service=\"market-data-platform-collector\"}",
           "refId": "A"
         }
       ],
@@ -209,7 +209,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_reconnects_total",
+          "expr": "mdp_ubwa_reconnects_total{service=\"market-data-platform-collector\"}",
           "refId": "A"
         }
       ],
@@ -268,7 +268,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_uptime_seconds",
+          "expr": "mdp_ubwa_uptime_seconds{service=\"market-data-platform-collector\"}",
           "refId": "A"
         }
       ],
@@ -328,7 +328,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_received_megabytes",
+          "expr": "mdp_ubwa_received_megabytes{service=\"market-data-platform-collector\"}",
           "refId": "A"
         }
       ],
@@ -386,7 +386,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_total_subscriptions",
+          "expr": "mdp_ubwa_total_subscriptions{service=\"market-data-platform-collector\"}",
           "refId": "A"
         }
       ],
@@ -477,12 +477,12 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_stream_buffer_length",
+          "expr": "mdp_ubwa_stream_buffer_length{service=\"market-data-platform-collector\"}",
           "legendFormat": "length",
           "refId": "A"
         },
         {
-          "expr": "mdp_ubwa_stream_buffer_maxlen",
+          "expr": "mdp_ubwa_stream_buffer_maxlen{service=\"market-data-platform-collector\"}",
           "legendFormat": "maxlen",
           "refId": "B"
         }
@@ -546,7 +546,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "100 * mdp_ubwa_stream_buffer_length / clamp_min(mdp_ubwa_stream_buffer_maxlen, 1)",
+          "expr": "100 * mdp_ubwa_stream_buffer_length{service=\"market-data-platform-collector\"} / clamp_min(mdp_ubwa_stream_buffer_maxlen{service=\"market-data-platform-collector\"}, 1)",
           "refId": "A"
         }
       ],
@@ -604,12 +604,12 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_crashed_streams",
+          "expr": "mdp_ubwa_crashed_streams{service=\"market-data-platform-collector\"}",
           "legendFormat": "crashed",
           "refId": "A"
         },
         {
-          "expr": "mdp_ubwa_restarting_streams",
+          "expr": "mdp_ubwa_restarting_streams{service=\"market-data-platform-collector\"}",
           "legendFormat": "restarting",
           "refId": "B"
         }
@@ -713,12 +713,12 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_bytes_per_second",
+          "expr": "mdp_ubwa_bytes_per_second{service=\"market-data-platform-collector\"}",
           "legendFormat": "bytes/s",
           "refId": "A"
         },
         {
-          "expr": "mdp_ubwa_messages_per_second",
+          "expr": "mdp_ubwa_messages_per_second{service=\"market-data-platform-collector\"}",
           "legendFormat": "messages/s",
           "refId": "B"
         }
@@ -810,7 +810,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "sum by (signal) (rate(mdp_ubwa_stream_signal_total[5m]))",
+          "expr": "sum by (signal) (rate(mdp_ubwa_stream_signal_total{service=\"market-data-platform-collector\"}[5m]))",
           "legendFormat": "{{signal}}",
           "refId": "A"
         }
@@ -901,12 +901,12 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_endpoint_errors",
+          "expr": "mdp_ubwa_endpoint_errors{service=\"market-data-platform-collector\"}",
           "legendFormat": "errors",
           "refId": "A"
         },
         {
-          "expr": "mdp_ubwa_endpoint_results",
+          "expr": "mdp_ubwa_endpoint_results{service=\"market-data-platform-collector\"}",
           "legendFormat": "results",
           "refId": "B"
         }
@@ -997,12 +997,12 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_process_cpu_percent",
+          "expr": "mdp_ubwa_process_cpu_percent{service=\"market-data-platform-collector\"}",
           "legendFormat": "cpu %",
           "refId": "A"
         },
         {
-          "expr": "mdp_ubwa_process_threads",
+          "expr": "mdp_ubwa_process_threads{service=\"market-data-platform-collector\"}",
           "legendFormat": "threads",
           "refId": "B"
         }
@@ -1094,7 +1094,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_process_memory_bytes",
+          "expr": "mdp_ubwa_process_memory_bytes{service=\"market-data-platform-collector\"}",
           "legendFormat": "rss",
           "refId": "A"
         }
@@ -1185,7 +1185,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ubwa_stream_subscriptions",
+          "expr": "mdp_ubwa_stream_subscriptions{service=\"market-data-platform-collector\"}",
           "legendFormat": "{{stream_label}} ({{stream_id}})",
           "refId": "A"
         }
@@ -1211,8 +1211,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Market Data Platform — Collector Health",
+  "title": "Market Data Platform — Trades & Liq Collector Health",
   "uid": "mdp-collector-health",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

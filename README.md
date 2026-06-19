@@ -1,54 +1,42 @@
-# Pargalı Ibrahim Library
+# Pargalı Ibrahim Library — BTC Intelligence Platform
 
-A self-hosted **Binance USDT-M Futures** market data platform: live WebSocket ingestion, hourly Parquet archival, metadata catalog, and Grafana-based operational monitoring.
+A self-hosted, **BTC-only** research system: live market data ingestion (Binance perp + Polymarket BTC 15m), Parquet normalization, derived cross-venue metrics, knowledge scores, and a local analyst agent — with Prometheus metrics, DuckDB catalog, and Grafana OSS monitoring.
 
-Built for operators who want a reproducible local pipeline without proprietary SaaS lock-in.
+Built for operators who want a reproducible single-node pipeline without proprietary SaaS lock-in.
+
+---
+
+## Five layers
+
+```
+Layer 1  RAW           → append-only JSONL under raw/
+Layer 2  NORMALIZED   → Parquet under data/ + DuckDB catalog
+Layer 3  DERIVED      → implied prob, PM–perp divergence, liquidity
+Layer 4  KNOWLEDGE    → momentum, positioning, fear, conviction scores
+Layer 5  AGENTS       → on-demand CLI briefing (catalog + derived + knowledge)
+```
+
+```
+Binance WS ──┐
+             ├──► raw/ ──► data/ (parquet) ──► derived ──► knowledge ──► agent CLI
+Polymarket ──┘              ↓
+                    Prometheus :9100–9103, :9101  →  Grafana :3001
+```
 
 ---
 
 ## What it does
 
-| Phase | Capability |
-|-------|------------|
-| **1 — Collection** | Streams agg trades and liquidations for BTC, SOL, XRP, DOGE, ETH, HYPE, BNB via [UBWA](https://github.com/LUCIT-Systems-and-Development/unicorn-binance-websocket-api) into append-only JSONL under `raw/` |
-| **2 — Conversion** | Parses, normalizes, and writes ZSTD-compressed Parquet under `data/` on an hourly schedule |
-| **3 — Observability** | Prometheus metrics, DuckDB metadata catalog, 8 Grafana dashboards, and 11 alert rules |
+| Component | Role |
+|-----------|------|
+| **Binance collector** (`:9100`) | BTCUSDT agg trades + liquidations |
+| **Orderbook collector** (`:9102`) | BTCUSDT depth@100ms + 15 min snapshots |
+| **Polymarket collector** (`:9103`) | BTC 15m Up/Down — direct CLOB WebSocket |
+| **Converter** (`:9101`) | raw → parquet, derived, knowledge, catalog, coverage, quality |
+| **Monitoring** | 11 Grafana dashboards, Prometheus alerts |
+| **Agent** | `run_agent.py brief` / `ask` — local, no LLM |
 
-```
-Binance WS  →  raw/ (JSONL)  →  data/ (Parquet)  →  DuckDB catalog
-                      ↓                    ↓
-              Prometheus :9100/:9101  →  Grafana :3001
-```
-
----
-
-## Screenshots
-
-Live Grafana dashboards (local OSS at `:3001`, folder **Market Data Platform**):
-
-### Dashboard folder
-
-All eight provisioned dashboards in one folder — Overview, Collector, Pipeline, Storage, Coverage, Quality, Catalog, and AI Layer.
-
-![Grafana dashboard folder](docs/screenshots/dashboard-folder.png)
-
-### Collector Health
-
-WebSocket exporter status, active streams, throughput, buffer fill, and process resources.
-
-![Collector Health dashboard](docs/screenshots/collector-health.png)
-
-### Pipeline Health
-
-Raw flush rates, Parquet batch processing, catalog sync, and conversion failures.
-
-![Pipeline Health dashboard](docs/screenshots/pipeline-health.png)
-
-### Data Quality
-
-Per-dataset validation scores, duplicate detection, and monotonic timestamp checks.
-
-![Data Quality dashboard](docs/screenshots/data-quality.png)
+**Symbols:** `BTCUSDT` (Binance), `BTC_15M` (Polymarket)
 
 ---
 
@@ -56,16 +44,16 @@ Per-dataset validation scores, duplicate detection, and monotonic timestamp chec
 
 - **Python** 3.11+ (tested on 3.14)
 - **Docker** + Docker Compose (monitoring stack only)
-- Outbound internet (Binance WebSocket + Docker image pulls)
-- ~10 GB free disk for sustained operation (varies with retention)
+- Outbound internet (Binance + Polymarket WebSocket, Docker pulls)
+- ~10 GB free disk for sustained operation
 
-No Binance API keys are required for public market streams.
+No API keys required for public market streams.
 
 ---
 
 ## Quick start
 
-### 1. Clone and install
+### 1. Install
 
 ```bash
 git clone git@github.com:0xanrelins/Pargali-Ibrahim-Library.git
@@ -75,43 +63,27 @@ python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```
 
-Verify dependencies:
+Verify:
 
 ```bash
 ./venv/bin/python -c "from unicorn_binance_websocket_api import BinanceWebSocketApiManager; print('UBWA OK')"
+./venv/bin/python -c "import pandas, pyarrow, duckdb; print('deps OK')"
 ```
 
-### 2. Start the collector (Terminal 1)
+### 2. Start collectors + converter
 
-Recommended entry point (includes Prometheus metrics on `:9100`):
+From project root (four terminals, or background with `&`):
 
 ```bash
-./venv/bin/python -u src/run_collector.py
+./venv/bin/python -u src/run_collector.py                  # :9100
+./venv/bin/python -u src/run_orderbook_collector.py        # :9102
+./venv/bin/python -u src/run_polymarket_collector.py       # :9103
+./venv/bin/python -u src/convert_parquet.py --loop         # :9101
 ```
 
-Legacy entry (no metrics wrapper):
+Stop any process with `Ctrl+C`.
 
-```bash
-./venv/bin/python -u src/collect_raw.py
-```
-
-### 3. Start the converter (Terminal 2)
-
-Hourly loop — also runs storage, coverage, quality, and catalog pollers:
-
-```bash
-./venv/bin/python -u src/convert_parquet.py --loop
-```
-
-Metrics endpoint: http://127.0.0.1:9101/metrics
-
-One-shot conversion:
-
-```bash
-./venv/bin/python src/convert_parquet.py --once
-```
-
-### 4. Start monitoring (background)
+### 3. Start monitoring
 
 ```bash
 cd monitoring
@@ -123,11 +95,49 @@ docker compose up -d
 |---------|-----|
 | Grafana | http://localhost:3001 |
 | Prometheus | http://localhost:9090 |
-| Loki | http://localhost:3100 |
 
-Default Grafana login: `admin` / `admin` (change via `monitoring/.env`).
+Open folder **Market Data Platform**. Key dashboards: **Overview**, **BTC Market Intelligence**, **Polymarket Collector Health**.
 
-Open the **Market Data Platform** folder in Grafana for all dashboards.
+### 4. Ask the agent
+
+```bash
+PYTHONPATH=src ./venv/bin/python src/run_agent.py brief
+PYTHONPATH=src ./venv/bin/python src/run_agent.py ask "pm ne diyor"
+PYTHONPATH=src ./venv/bin/python src/run_agent.py ask "divergence"
+```
+
+---
+
+## Command reference
+
+Project root:
+
+```bash
+cd "/path/to/Pargali-Ibrahim-Library"
+```
+
+| Task | Command |
+|------|---------|
+| Parse dry-run (no writes) | `./venv/bin/python src/parse_raw.py` |
+| One-shot convert | `./venv/bin/python src/convert_parquet.py --once` |
+| Converter loop | `./venv/bin/python -u src/convert_parquet.py --loop` |
+| Metrics | `curl -s localhost:9100/metrics \| head` (also `:9101`, `:9102`, `:9103`) |
+| Recreate Grafana | `cd monitoring && docker compose up -d grafana --force-recreate` |
+| Stop monitoring | `cd monitoring && docker compose down` |
+
+**Manual catch-up** (rare) — drain a large raw backlog. **Stop `--loop` first**, run one or more batches, then restart loop. **Never run catch-up while `--loop` is active** (Parquet append race).
+
+```bash
+PYTHONPATH=src ./venv/bin/python -c "
+from convert_parquet import convert_once, collect_parquet_backlog_metrics, project_paths
+p = project_paths()
+print('before', collect_parquet_backlog_metrics(project_root=p[0], raw_root=p[1], state_path=p[3]))
+print('batch', convert_once())
+print('after', collect_parquet_backlog_metrics(project_root=p[0], raw_root=p[1], state_path=p[3]))
+"
+```
+
+If port `:9101` is in use, the loop is already running.
 
 ---
 
@@ -135,69 +145,107 @@ Open the **Market Data Platform** folder in Grafana for all dashboards.
 
 ```
 ├── src/
-│   ├── collect_raw.py       # Phase 1 — WebSocket → raw/
-│   ├── run_collector.py     # Phase 1 + metrics exporter (:9100)
-│   ├── convert_parquet.py   # Phase 2 + catalog/quality pollers (:9101)
-│   ├── parse_raw.py         # Parse dry-run helper
-│   ├── metrics/             # Prometheus metric registries
-│   └── catalog/             # DuckDB sync + AI metadata hooks
-├── raw/                     # JSONL (gitignored contents)
-├── data/                    # Parquet (gitignored contents)
-├── catalog/
-│   ├── config.yaml          # Catalog paths + schema version
-│   └── catalog.duckdb       # Generated at runtime (gitignored)
-├── monitoring/
-│   ├── docker-compose.yml   # Grafana, Prometheus, Loki, Promtail
-│   ├── prometheus/          # Scrape config
-│   ├── grafana/provisioning/# Dashboards, datasources, alerts
-│   └── alerts/config.yaml   # Alert thresholds (reference)
-├── infra/monitoring/grafana/dashboards/  # Dashboard JSON (source of truth)
-├── requirements.txt
-├── komutlar.md              # Command cheat sheet (Turkish)
-└── AGENTS.md                # Guidance for AI coding agents
+│   ├── collect_raw.py / run_collector.py          # Binance trades + liq (:9100)
+│   ├── collect_orderbook.py / run_orderbook_...   # Orderbook (:9102)
+│   ├── collect_polymarket.py / run_polymarket_...# Polymarket (:9103)
+│   ├── convert_parquet.py                         # Converter + pollers (:9101)
+│   ├── derive_polymarket.py / derive_cross_market.py
+│   ├── knowledge/btc_suite.py
+│   ├── agents/btc_analyst.py / run_agent.py
+│   ├── datasets.py                                # Source registry
+│   ├── collectors/                                # Adapter layer
+│   ├── metrics/ / catalog/
+├── raw/                     # JSONL (gitignored)
+├── data/                    # Parquet (gitignored)
+├── catalog/catalog.duckdb   # Runtime catalog (gitignored)
+├── monitoring/              # Docker Compose stack
+├── infra/monitoring/grafana/dashboards/  # Dashboard JSON source of truth
+├── README.md
+└── AGENTS.md                # AI agent guidance
 ```
 
 ---
 
 ## Data model
 
-**Symbols:** BTCUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, ETHUSDT, HYPEUSDT, BNBUSDT
+**Layout:** `data/{category}/{exchange}/{symbol}/{day}.parquet`
 
-**Categories:**
+**Binance (`binance_futures`, symbol `BTCUSDT`):**
 
-- `trades` — aggTrade events
-- `liquidations` — forceOrder events
+| Category | Content |
+|----------|---------|
+| `trades` | aggTrade |
+| `liquidations` | forceOrder |
+| `orderbook_diff` | depth@100ms deltas |
+| `orderbook_snapshots` | 15 min full book |
 
-**Parquet layout:**
+**Polymarket (`polymarket`, symbol `BTC_15M`):**
 
-```
-data/{category}/binance_futures/{SYMBOL}/YYYY-MM-DD/HH.parquet
-```
+| Category | Content |
+|----------|---------|
+| `prediction_metadata` | Market slug, token ids, expiry |
+| `prediction_price` | best_bid_ask, price_change |
+| `prediction_orderbook` | book snapshots |
+| `prediction_trades` | last_trade_price |
+| `prediction_derived` | implied prob, divergence, liquidity (computed) |
 
-**Dataset ID format (catalog):** `trades:binance_futures:BTCUSDT`
+**Knowledge (`knowledge`, symbol `BTC_SUITE`):**
 
-Query with DuckDB — see [duckdb-parquet-kontrol.md](duckdb-parquet-kontrol.md) or:
+| Category | Content |
+|----------|---------|
+| `btc_signals` | momentum, positioning, fear, conviction |
+
+**Dataset ID (catalog):** `{category}:{exchange}:{symbol}` — e.g. `trades:binance_futures:BTCUSDT`
+
+---
+
+## DuckDB queries
 
 ```bash
+# Trade counts
 ./venv/bin/python -c "
 import duckdb
 print(duckdb.connect().execute('''
   SELECT symbol, COUNT(*) AS n
   FROM read_parquet('data/trades/binance_futures/*/*.parquet')
-  GROUP BY 1 ORDER BY 1
+  GROUP BY 1
+''').df())
+"
+
+# Latest PM derived (Up)
+./venv/bin/python -c "
+import duckdb
+print(duckdb.connect().execute('''
+  SELECT timestamp, implied_prob, pm_perp_divergence, btc_return_bps
+  FROM read_parquet('data/prediction_derived/polymarket/BTC_15M/*.parquet')
+  WHERE outcome = 'Up'
+  ORDER BY timestamp DESC LIMIT 5
+''').df())
+"
+
+# Knowledge scores
+./venv/bin/python -c "
+import duckdb
+print(duckdb.connect().execute('''
+  SELECT * FROM read_parquet('data/btc_signals/knowledge/BTC_SUITE/*.parquet')
+  ORDER BY timestamp DESC LIMIT 3
 ''').df())
 "
 ```
+
+Healthy pipeline: trade counts grow over time; converter loop keeps Parquet backlog near zero (see **Pipeline Health** dashboard).
 
 ---
 
 ## Monitoring & alerting
 
-Eight dashboards cover collector health, pipeline throughput, storage, coverage, quality, metadata catalog, AI layer, and a top-level overview.
+**Dashboards** (folder **Market Data Platform**):
 
-Eleven Grafana-managed alert rules are provisioned from `monitoring/grafana/provisioning/alerting/`. Thresholds are documented in `monitoring/alerts/config.yaml`.
+Overview · Collector Health · Orderbook Collector Health · Polymarket Collector Health · Pipeline Health · Storage Health · Data Coverage · Data Quality · Metadata Catalog · AI Layer · **BTC Market Intelligence**
 
-Contact points (`mdp-alerts`, `mdp-alerts-webhook`) are stubs — configure SMTP or a real webhook URL before expecting notifications.
+Alert rules are provisioned from `monitoring/grafana/provisioning/alerting/`. Threshold reference: `monitoring/alerts/config.yaml`.
+
+Contact points are stubs — configure SMTP or webhook before expecting notifications.
 
 ---
 
@@ -205,22 +253,23 @@ Contact points (`mdp-alerts`, `mdp-alerts-webhook`) are stubs — configure SMTP
 
 | File | Purpose |
 |------|---------|
-| `catalog/config.yaml` | DuckDB path, raw/data roots, schema version |
-| `monitoring/.env` | Grafana admin credentials |
-| `monitoring/alerts/config.yaml` | Alert threshold reference |
+| `catalog/config.yaml` | DuckDB path, data roots |
+| `monitoring/.env` | Grafana credentials |
+| `monitoring/alerts/config.yaml` | Alert thresholds (reference) |
+| `src/datasets.py` | Exchange/category registry |
 
-Symbols and flush intervals are defined in `src/collect_raw.py`. Adjust there for additional markets.
+BTC symbol lists: `TARGET_SYMBOLS` / `TRADE_MARKETS` in `collect_raw.py`.
 
 ---
 
 ## Operational notes
 
-- **No historical backfill** — recording starts when the collector connects. Gaps during downtime are not recovered automatically.
-- **WebSocket-only** — REST historical download is out of scope.
-- **Liquidations are sparse** — coverage alerts apply to `trades` only to avoid false positives.
-- **Prometheus scrapes host ports** — Docker uses `host.docker.internal:9100` and `:9101`; ensure both Python processes are running before expecting dashboard data.
-
-Stop any process with `Ctrl+C`. Stop monitoring with `docker compose down` from `monitoring/`.
+- **No historical backfill** — recording starts when collectors connect.
+- **Raw retention** — processed JSONL deleted after 24 h grace by converter cleanup poller.
+- **Parquet backlog** — metric `mdp_pipeline_parquet_raw_backlog_files` on `:9101`.
+- **Liquidations are sparse** — coverage alerts target `trades`; empty liquidation parquet is normal.
+- **Derived metrics** export from converter (`:9101`), not Polymarket collector (`:9103`).
+- **Prometheus** scrapes host ports via `host.docker.internal` — keep all four Python processes running.
 
 ---
 
@@ -228,18 +277,17 @@ Stop any process with `Ctrl+C`. Stop monitoring with `docker compose down` from 
 
 | Symptom | Check |
 |---------|-------|
-| Empty Grafana panels | Collector/converter running? `curl localhost:9100/metrics` and `:9101/metrics` |
-| Grafana restart loop | Do not set `GF_INSTALL_PLUGINS` for broken plugins; recreate container |
-| Catalog empty | Wait for first converter loop (~5 min) or run `--once` |
-| High duplicate rate in quality dashboard | Expected with overlapping hourly parquet appends |
-
-More commands: [komutlar.md](komutlar.md)
+| Empty Grafana panels | All four processes up? `curl localhost:9100/metrics` … `:9103` |
+| `--once` port in use | Loop already on `:9101` — stop loop first for catch-up |
+| Parquet backlog high | Pipeline Health → stop loop → catch-up → restart loop |
+| Grafana crash on start | Do not install broken Grafana plugins (see AGENTS.md) |
+| PM metrics stale | Converter running? `derive_polymarket_once` runs inside `convert_once()` |
 
 ---
 
 ## Disclaimer
 
-This software is provided for research and operational visibility. It is not financial advice. Binance market data is subject to Binance's terms of use. You are responsible for compliance, rate limits, and infrastructure costs.
+For research and operational visibility only — not financial advice. You are responsible for exchange terms, rate limits, and infrastructure costs.
 
 ---
 

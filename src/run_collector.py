@@ -9,10 +9,12 @@ import sys
 
 from unicorn_binance_websocket_api import BinanceWebSocketApiManager
 
+from collectors.binance import BinanceUbwaAdapter
 from collect_raw import (
     EXCHANGE,
     RAW_ROOT,
     FLUSH_INTERVAL_SEC,
+    TRADE_MARKETS,
     request_stop,
     run_collector_loop,
     setup_streams,
@@ -54,9 +56,17 @@ def main() -> int:
             enable_stream_signal_buffer=True,
         ) as ubwa:
             signal_recorder.bind(ubwa)
+            adapter = BinanceUbwaAdapter(
+                ubwa=ubwa,
+                service_name="market-data-platform-collector",
+                subscription_count=len(TRADE_MARKETS) + 1,
+            )
+            adapter.connect()
             setup_streams(ubwa)
+            adapter.subscribe()
             poller = start_ubwa_poller(ubwa)
             run_collector_loop(ubwa)
+            adapter.disconnect()
     finally:
         if poller is not None:
             poller.stop()

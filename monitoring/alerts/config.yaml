@@ -29,6 +29,20 @@ alerts:
     pending_period: 2m
     up_value: 1
 
+  orderbook_collector_disconnected:
+    enabled: true
+    severity: critical
+    description: Orderbook collector Prometheus exporter is down or unreachable.
+    pending_period: 2m
+    up_value: 1
+
+  polymarket_collector_disconnected:
+    enabled: true
+    severity: critical
+    description: Polymarket collector Prometheus exporter is down or unreachable.
+    pending_period: 2m
+    up_value: 1
+
   buffer_near_capacity:
     enabled: true
     severity: warning
@@ -79,9 +93,19 @@ alerts:
     description: Dataset coverage fell below the minimum acceptable percentage.
     pending_period: 15m
     min_coverage_percent: 95
-    # Liquidations are sparse; alert only applies to trades unless overridden.
     categories:
       - trades
+
+  coverage_low_polymarket:
+    enabled: true
+    severity: warning
+    description: Polymarket prediction_price coverage fell below the minimum acceptable percentage.
+    pending_period: 15m
+    min_coverage_percent: 95
+    categories:
+      - prediction_price
+    symbols:
+      - BTC_15M
 
   schema_change_detected:
     enabled: true

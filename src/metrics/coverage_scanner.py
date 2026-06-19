@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from datasets import discover_metric_datasets, symbol_parquet_root
 from metrics.coverage_registry import (
     coverage_day_present,
     coverage_first_timestamp_seconds,
@@ -26,7 +27,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SCAN_INTERVAL_SEC = 300.0
 HOUR_TRACKING_LOOKBACK_DAYS = 14
-CATEGORIES = ("trades", "liquidations")
 
 
 @dataclass
@@ -70,16 +70,8 @@ def _read_parquet_coverage(parquet_path: Path) -> tuple[set[int], int, int] | No
     )
 
 
-def _discover_datasets(data_root: Path) -> list[tuple[str, str]]:
-    datasets: list[tuple[str, str]] = []
-    for category in CATEGORIES:
-        category_root = data_root / category / "binance_futures"
-        if not category_root.exists():
-            continue
-        for symbol_dir in sorted(category_root.iterdir()):
-            if symbol_dir.is_dir():
-                datasets.append((category, symbol_dir.name))
-    return datasets
+def _discover_datasets(data_root: Path) -> list[tuple[str, str, str]]:
+    return discover_metric_datasets(data_root)
 
 
 def _day_range(start_day: str, end_day: str) -> list[str]:
@@ -116,10 +108,11 @@ def _expected_hours_for_day(
 
 def _scan_dataset(
     data_root: Path,
+    exchange: str,
     category: str,
     symbol: str,
 ) -> tuple[datetime | None, datetime | None, dict[str, DayCoverage]]:
-    symbol_root = data_root / category / "binance_futures" / symbol
+    symbol_root = symbol_parquet_root(data_root, exchange, category, symbol)
     if not symbol_root.exists():
         return None, None, {}
 
@@ -241,9 +234,9 @@ def collect_coverage_metrics(*, data_root: Path) -> None:
         datetime.now(UTC) - timedelta(days=HOUR_TRACKING_LOOKBACK_DAYS)
     ).strftime("%Y-%m-%d")
 
-    for category, symbol in _discover_datasets(data_root):
+    for exchange, category, symbol in _discover_datasets(data_root):
         current_datasets.add((category, symbol))
-        first_ts, last_ts, day_map = _scan_dataset(data_root, category, symbol)
+        first_ts, last_ts, day_map = _scan_dataset(data_root, exchange, category, symbol)
 
         if first_ts is None or last_ts is None:
             _zero_dataset_metrics(category, symbol)

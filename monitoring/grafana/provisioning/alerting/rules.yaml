@@ -102,6 +102,100 @@ groups:
           summary: Collector Prometheus exporter is down or unreachable
           description: mdp_up for market-data-platform-collector is below 1.
 
+      - uid: mdp-orderbook-down
+        title: MDP Orderbook Collector Disconnected
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: mdp_up{service="market-data-platform-orderbook"}
+              instant: true
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: $B < 1
+              refId: C
+              type: math
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        labels:
+          alertname: orderbook_collector_disconnected
+          severity: critical
+        annotations:
+          summary: Orderbook collector Prometheus exporter is down or unreachable
+          description: mdp_up for market-data-platform-orderbook is below 1.
+
+      - uid: mdp-polymarket-down
+        title: MDP Polymarket Collector Disconnected
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: mdp_up{service="market-data-platform-polymarket"}
+              instant: true
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: $B < 1
+              refId: C
+              type: math
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        labels:
+          alertname: polymarket_collector_disconnected
+          severity: critical
+        annotations:
+          summary: Polymarket collector Prometheus exporter is down or unreachable
+          description: mdp_up for market-data-platform-polymarket is below 1.
+
       - uid: mdp-converter-down
         title: MDP Converter Disconnected
         condition: C
@@ -479,6 +573,53 @@ groups:
         annotations:
           summary: Trades dataset coverage fell below 95%
           description: One or more trades datasets have low hourly coverage.
+
+      - uid: mdp-coverage-low-pm
+        title: MDP Coverage Low (Polymarket)
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 300
+              to: 0
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              editorMode: code
+              expr: min(mdp_coverage_percent{category="prediction_price", symbol="BTC_15M"}) < 95
+              instant: true
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: $B > 0
+              refId: C
+              type: math
+        noDataState: OK
+        execErrState: Alerting
+        for: 15m
+        labels:
+          alertname: coverage_low_polymarket
+          severity: warning
+        annotations:
+          summary: Polymarket prediction_price coverage fell below 95%
+          description: BTC_15M prediction_price hourly coverage is below threshold.
 
       - uid: mdp-schema-change
         title: MDP Schema Change Detected

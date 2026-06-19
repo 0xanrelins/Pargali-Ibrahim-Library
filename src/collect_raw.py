@@ -10,6 +10,7 @@ from pathlib import Path
 
 from unicorn_binance_websocket_api import BinanceWebSocketApiManager
 
+from datasets import BINANCE_FUTURES, raw_root as dataset_raw_root
 from metrics.pipeline_registry import (
     raw_bytes_written_total,
     raw_files_written_total,
@@ -18,20 +19,12 @@ from metrics.pipeline_registry import (
 )
 
 EXCHANGE = "binance.com-futures"
-TRADE_MARKETS = [
-    "btcusdt",
-    "solusdt",
-    "xrpusdt",
-    "dogeusdt",
-    "ethusdt",
-    "hypeusdt",
-    "bnbusdt",
-]
+TRADE_MARKETS = ["btcusdt"]
 POLL_INTERVAL_SEC = 0.01
 FLUSH_INTERVAL_SEC = 60
 REPORT_INTERVAL_SEC = 10
 
-RAW_ROOT = Path(__file__).resolve().parent.parent / "raw" / "binance_futures"
+RAW_ROOT = dataset_raw_root(Path(__file__).resolve().parent.parent, BINANCE_FUTURES)
 
 logging.basicConfig(
     level=logging.INFO,

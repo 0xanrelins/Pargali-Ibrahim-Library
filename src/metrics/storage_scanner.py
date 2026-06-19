@@ -10,6 +10,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from datasets import discover_symbol_dirs, exchange_category_root
 from metrics.storage_registry import (
     storage_daily_growth_bytes,
     storage_free_bytes,
@@ -54,8 +55,8 @@ def _bytes_added_since(path: Path, since: datetime) -> int:
     return total
 
 
-def _largest_symbol_dirs(data_root: Path, category: str) -> list[tuple[str, int]]:
-    category_root = data_root / category / "binance_futures"
+def _largest_symbol_dirs(data_root: Path, exchange: str, category: str) -> list[tuple[str, int]]:
+    category_root = exchange_category_root(data_root, exchange, category)
     if not category_root.exists():
         return []
 
@@ -108,13 +109,17 @@ def _update_largest_datasets(data_root: Path) -> None:
     global _seen_largest
 
     current: set[tuple[str, str]] = set()
-    for category in ("trades", "liquidations"):
-        for symbol, size in _largest_symbol_dirs(data_root, category)[:5]:
-            current.add((category, symbol))
-            storage_largest_dataset_bytes.labels(
-                category=category,
-                symbol=symbol,
-            ).set(size)
+    for exchange, category, symbol in discover_symbol_dirs(data_root):
+        category_root = exchange_category_root(data_root, exchange, category)
+        symbol_dir = category_root / symbol
+        if not symbol_dir.is_dir():
+            continue
+        size = _dir_size(symbol_dir)
+        current.add((category, symbol))
+        storage_largest_dataset_bytes.labels(
+            category=category,
+            symbol=symbol,
+        ).set(size)
 
     for category, symbol in _seen_largest - current:
         storage_largest_dataset_bytes.labels(
