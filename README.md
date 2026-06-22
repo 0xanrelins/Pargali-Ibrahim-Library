@@ -1,5 +1,13 @@
 # Pargalı Ibrahim Library — BTC Intelligence Platform
 
+## Project Goal
+
+Collect raw market data and convert it into immutable normalized parquet batches.
+
+Nothing else.
+
+---
+
 A self-hosted, **BTC-only** research system: live market data ingestion (Binance perp + Polymarket BTC 15m), Parquet normalization, derived cross-venue metrics, knowledge scores, and a local analyst agent — with Prometheus metrics, DuckDB catalog, and Grafana OSS monitoring.
 
 Built for operators who want a reproducible single-node pipeline without proprietary SaaS lock-in.
@@ -96,7 +104,7 @@ docker compose up -d
 | Grafana | http://localhost:3001 |
 | Prometheus | http://localhost:9090 |
 
-Open folder **Market Data Platform**. Key dashboards: **Overview**, **BTC Market Intelligence**, **Polymarket Collector Health**.
+Open folder **PargaliIbrahim Canvas**. Key dashboards: **Overview**, **BTC Market Intelligence**, **Polymarket Collector Health**.
 
 ### 4. Ask the agent
 
@@ -125,19 +133,7 @@ cd "/path/to/Pargali-Ibrahim-Library"
 | Recreate Grafana | `cd monitoring && docker compose up -d grafana --force-recreate` |
 | Stop monitoring | `cd monitoring && docker compose down` |
 
-**Manual catch-up** (rare) — drain a large raw backlog. **Stop `--loop` first**, run one or more batches, then restart loop. **Never run catch-up while `--loop` is active** (Parquet append race).
-
-```bash
-PYTHONPATH=src ./venv/bin/python -c "
-from convert_parquet import convert_once, collect_parquet_backlog_metrics, project_paths
-p = project_paths()
-print('before', collect_parquet_backlog_metrics(project_root=p[0], raw_root=p[1], state_path=p[3]))
-print('batch', convert_once())
-print('after', collect_parquet_backlog_metrics(project_root=p[0], raw_root=p[1], state_path=p[3]))
-"
-```
-
-If port `:9101` is in use, the loop is already running.
+**Converter catch-up / parquet reset** — see [AGENTS.md](AGENTS.md) (*Converter catch-up and parquet reset*). Never run catch-up while `--loop` is active.
 
 ---
 
@@ -239,7 +235,7 @@ Healthy pipeline: trade counts grow over time; converter loop keeps Parquet back
 
 ## Monitoring & alerting
 
-**Dashboards** (folder **Market Data Platform**):
+**Dashboards** (folder **PargaliIbrahim Canvas**):
 
 Overview · Collector Health · Orderbook Collector Health · Polymarket Collector Health · Pipeline Health · Storage Health · Data Coverage · Data Quality · Metadata Catalog · AI Layer · **BTC Market Intelligence**
 
@@ -278,10 +274,10 @@ BTC symbol lists: `TARGET_SYMBOLS` / `TRADE_MARKETS` in `collect_raw.py`.
 | Symptom | Check |
 |---------|-------|
 | Empty Grafana panels | All four processes up? `curl localhost:9100/metrics` … `:9103` |
-| `--once` port in use | Loop already on `:9101` — stop loop first for catch-up |
-| Parquet backlog high | Pipeline Health → stop loop → catch-up → restart loop |
+| `--once` port in use | Loop on `:9101` — see AGENTS.md catch-up section |
+| Parquet backlog high / converter killed | AGENTS.md — stop loop, batch catch-up, parquet reset rules |
 | Grafana crash on start | Do not install broken Grafana plugins (see AGENTS.md) |
-| PM metrics stale | Converter running? `derive_polymarket_once` runs inside `convert_once()` |
+| PM or DuckDB panels stale | Converter running on `:9101`? See AGENTS.md |
 
 ---
 

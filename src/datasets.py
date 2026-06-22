@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 BINANCE_FUTURES = "binance_futures"
+BINANCE_FUTURES_SYMBOL = "BTCUSDT"
 POLYMARKET = "polymarket"
 POLYMARKET_SYMBOL = "BTC_15M"
 KNOWLEDGE = "knowledge"
@@ -125,7 +126,24 @@ def parquet_path(
     symbol: str,
     day: str,
 ) -> Path:
+    """Legacy daily rollup layout: data/{category}/{exchange}/{symbol}/{day}.parquet."""
     return symbol_parquet_root(data_root, exchange, category, symbol) / f"{day}.parquet"
+
+
+def parquet_batch_path(
+    data_root: Path,
+    exchange: str,
+    category: str,
+    symbol: str,
+    date: str,
+    batch_stamp: str,
+) -> Path:
+    """Immutable batch layout: data/{category}/{exchange}/{symbol}/{date}/{batch_stamp}.parquet."""
+    return (
+        symbol_parquet_root(data_root, exchange, category, symbol)
+        / date
+        / f"{batch_stamp}.parquet"
+    )
 
 
 def dataset_id(exchange: str, category: str, symbol: str) -> str:
