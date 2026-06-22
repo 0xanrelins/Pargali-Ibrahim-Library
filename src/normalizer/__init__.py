@@ -8,6 +8,7 @@ from normalizer.paths import (
     project_paths,
     relative_to_project,
 )
+from normalizer.runner import collect_backlog_metrics, normalize_once
 from normalizer.schemas import (
     category_columns,
     create_empty_table_sql,
@@ -27,9 +28,11 @@ __all__ = [
     "category_columns",
     "create_empty_table_sql",
     "insert_typed_select_sql",
+    "collect_backlog_metrics",
     "load_polymarket_tokens",
     "load_processed_files",
     "normalize_jsonl_batch",
+    "normalize_once",
     "normalized_categories",
     "parse_jsonl_file",
     "parse_raw_jsonl_path",
