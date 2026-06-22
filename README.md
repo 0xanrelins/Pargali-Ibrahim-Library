@@ -18,7 +18,7 @@ Built for operators who want a reproducible single-node pipeline without proprie
 
 ```
 Layer 1  RAW           → append-only JSONL under raw/
-Layer 2  NORMALIZED   → Parquet under data/ + DuckDB catalog
+Layer 2  NORMALIZED   → immutable parquet batches under data/ (1 JSONL → 1 parquet)
 Layer 3  DERIVED      → implied prob, PM–perp divergence, liquidity
 Layer 4  KNOWLEDGE    → momentum, positioning, fear, conviction scores
 Layer 5  AGENTS       → on-demand CLI briefing (catalog + derived + knowledge)
@@ -26,10 +26,12 @@ Layer 5  AGENTS       → on-demand CLI briefing (catalog + derived + knowledge)
 
 ```
 Binance WS ──┐
-             ├──► raw/ ──► data/ (parquet) ──► derived ──► knowledge ──► agent CLI
+             ├──► raw/ ──► data/ (immutable parquet batches)
 Polymarket ──┘              ↓
                     Prometheus :9100–9103, :9101  →  Grafana :3001
 ```
+
+Derived, knowledge, catalog, and agent layers exist in the repo but are **out of scope** for the normalizer process.
 
 ---
 
@@ -40,7 +42,7 @@ Polymarket ──┘              ↓
 | **Binance collector** (`:9100`) | BTCUSDT agg trades + liquidations |
 | **Orderbook collector** (`:9102`) | BTCUSDT depth@100ms + 15 min snapshots |
 | **Polymarket collector** (`:9103`) | BTC 15m Up/Down — direct CLOB WebSocket |
-| **Converter** (`:9101`) | raw → parquet, derived, knowledge, catalog, coverage, quality |
+| **Normalizer** (`:9101`) | raw JSONL → immutable parquet batches (DuckDB writer) |
 | **Monitoring** | 11 Grafana dashboards, Prometheus alerts |
 | **Agent** | `run_agent.py brief` / `ask` — local, no LLM |
 
@@ -78,7 +80,7 @@ Verify:
 ./venv/bin/python -c "import pandas, pyarrow, duckdb; print('deps OK')"
 ```
 
-### 2. Start collectors + converter
+### 2. Start collectors + normalizer
 
 From project root (four terminals, or background with `&`):
 
@@ -86,7 +88,7 @@ From project root (four terminals, or background with `&`):
 ./venv/bin/python -u src/run_collector.py                  # :9100
 ./venv/bin/python -u src/run_orderbook_collector.py        # :9102
 ./venv/bin/python -u src/run_polymarket_collector.py       # :9103
-./venv/bin/python -u src/convert_parquet.py --loop         # :9101
+./venv/bin/python -u src/normalize_parquet.py --loop       # :9101
 ```
 
 Stop any process with `Ctrl+C`.
@@ -127,13 +129,13 @@ cd "/path/to/Pargali-Ibrahim-Library"
 | Task | Command |
 |------|---------|
 | Parse dry-run (no writes) | `./venv/bin/python src/parse_raw.py` |
-| One-shot convert | `./venv/bin/python src/convert_parquet.py --once` |
-| Converter loop | `./venv/bin/python -u src/convert_parquet.py --loop` |
+| One-shot normalize | `./venv/bin/python src/normalize_parquet.py --once` |
+| Normalizer loop | `./venv/bin/python -u src/normalize_parquet.py --loop` |
 | Metrics | `curl -s localhost:9100/metrics \| head` (also `:9101`, `:9102`, `:9103`) |
 | Recreate Grafana | `cd monitoring && docker compose up -d grafana --force-recreate` |
 | Stop monitoring | `cd monitoring && docker compose down` |
 
-**Converter catch-up / parquet reset** — see [AGENTS.md](AGENTS.md) (*Converter catch-up and parquet reset*). Never run catch-up while `--loop` is active.
+**Normalizer catch-up / cutover** — see [AGENTS.md](AGENTS.md) (*Normalizer cutover and catch-up*). Never run two processes on `:9101`.
 
 ---
 
@@ -144,7 +146,9 @@ cd "/path/to/Pargali-Ibrahim-Library"
 │   ├── collect_raw.py / run_collector.py          # Binance trades + liq (:9100)
 │   ├── collect_orderbook.py / run_orderbook_...   # Orderbook (:9102)
 │   ├── collect_polymarket.py / run_polymarket_...# Polymarket (:9103)
-│   ├── convert_parquet.py                         # Converter + pollers (:9101)
+│   ├── normalize_parquet.py                       # Normalizer CLI (:9101)
+│   ├── normalizer/                                # DuckDB batch writer
+│   ├── convert_parquet.py                         # Deprecated → normalize_parquet
 │   ├── derive_polymarket.py / derive_cross_market.py
 │   ├── knowledge/btc_suite.py
 │   ├── agents/btc_analyst.py / run_agent.py
@@ -164,7 +168,9 @@ cd "/path/to/Pargali-Ibrahim-Library"
 
 ## Data model
 
-**Layout:** `data/{category}/{exchange}/{symbol}/{day}.parquet`
+**Layout (current):** `data/{category}/{exchange}/{symbol}/{date}/{time}.parquet` — one immutable batch per raw JSONL file.
+
+**Legacy (deprecated):** `data/{category}/{exchange}/{symbol}/{day}.parquet` — daily rollup from old converter.
 
 **Binance (`binance_futures`, symbol `BTCUSDT`):**
 
@@ -203,7 +209,7 @@ cd "/path/to/Pargali-Ibrahim-Library"
 import duckdb
 print(duckdb.connect().execute('''
   SELECT symbol, COUNT(*) AS n
-  FROM read_parquet('data/trades/binance_futures/*/*.parquet')
+  FROM read_parquet('data/trades/binance_futures/BTCUSDT/*/*.parquet')
   GROUP BY 1
 ''').df())
 "
@@ -229,7 +235,7 @@ print(duckdb.connect().execute('''
 "
 ```
 
-Healthy pipeline: trade counts grow over time; converter loop keeps Parquet backlog near zero (see **Pipeline Health** dashboard).
+Healthy pipeline: trade counts grow over time; normalizer keeps backlog near zero (see **Pipeline Health** dashboard).
 
 ---
 
@@ -261,11 +267,10 @@ BTC symbol lists: `TARGET_SYMBOLS` / `TRADE_MARKETS` in `collect_raw.py`.
 ## Operational notes
 
 - **No historical backfill** — recording starts when collectors connect.
-- **Raw retention** — processed JSONL deleted after 24 h grace by converter cleanup poller.
+- **Raw retention** — raw JSONL is kept; the normalizer does not delete raw files.
 - **Parquet backlog** — metric `mdp_pipeline_parquet_raw_backlog_files` on `:9101`.
-- **Liquidations are sparse** — coverage alerts target `trades`; empty liquidation parquet is normal.
-- **Derived metrics** export from converter (`:9101`), not Polymarket collector (`:9103`).
-- **Prometheus** scrapes host ports via `host.docker.internal` — keep all four Python processes running.
+- **Liquidations are sparse** — empty liquidation batches are normal.
+- **Prometheus** scrapes host ports via `host.docker.internal` — keep collectors + normalizer running.
 
 ---
 
@@ -274,10 +279,9 @@ BTC symbol lists: `TARGET_SYMBOLS` / `TRADE_MARKETS` in `collect_raw.py`.
 | Symptom | Check |
 |---------|-------|
 | Empty Grafana panels | All four processes up? `curl localhost:9100/metrics` … `:9103` |
-| `--once` port in use | Loop on `:9101` — see AGENTS.md catch-up section |
-| Parquet backlog high / converter killed | AGENTS.md — stop loop, batch catch-up, parquet reset rules |
-| Grafana crash on start | Do not install broken Grafana plugins (see AGENTS.md) |
-| PM or DuckDB panels stale | Converter running on `:9101`? See AGENTS.md |
+| `--once` port in use | Normalizer loop on `:9101` — stop duplicate process |
+| Parquet backlog high | AGENTS.md — cutover, reset `processed.json`, batch catch-up |
+| PM or DuckDB panels stale | Panels may target legacy paths — see AGENTS.md |
 
 ---
 

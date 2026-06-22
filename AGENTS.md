@@ -31,7 +31,9 @@ Phases 1–3 plus Polymarket, derived metrics, knowledge, and agent v1 are imple
 | `src/collect_polymarket.py` | Polymarket CLOB WS → `raw/` |
 | `src/run_polymarket_collector.py` | Wrapper + `:9103` metrics |
 | `src/parse_raw.py` / `src/parse_polymarket.py` | JSONL → row dicts |
-| `src/convert_parquet.py` | Multi-exchange parquet + pollers on `:9101` |
+| `src/normalize_parquet.py` | Normalizer CLI (`--once` / `--loop`) on `:9101` |
+| `src/normalizer/` | DuckDB writer, schemas, paths, runner (1 JSONL → 1 parquet) |
+| `src/convert_parquet.py` | **Deprecated** — delegates to `normalize_parquet.py` |
 | `src/derive_polymarket.py` | PM derived metrics (Tier 1–2) |
 | `src/derive_cross_market.py` | PM–perp divergence (Tier 3) |
 | `src/knowledge/btc_suite.py` | Knowledge scores (Layer 4) |
@@ -55,7 +57,7 @@ Four Python processes + Docker for full observability:
 ./venv/bin/python -u src/run_collector.py               # :9100
 ./venv/bin/python -u src/run_orderbook_collector.py     # :9102
 ./venv/bin/python -u src/run_polymarket_collector.py      # :9103
-./venv/bin/python -u src/convert_parquet.py --loop        # :9101
+./venv/bin/python -u src/normalize_parquet.py --loop   # :9101
 cd monitoring && docker compose up -d                     # Grafana :3001
 ```
 
@@ -73,10 +75,63 @@ Run Python with `PYTHONPATH=src` or from project root using `./venv/bin/python s
 
 ```
 raw/{exchange}/{category}/{date}/{time}.jsonl
-data/{category}/{exchange}/{symbol}/{day}.parquet
+data/{category}/{exchange}/{symbol}/{date}/{time}.parquet   # immutable batches (current)
+data/{category}/{exchange}/{symbol}/{day}.parquet             # legacy daily rollup (deprecated)
 ```
 
 Registry: `src/datasets.py` — add new sources/categories here first.
+
+---
+
+## Normalizer cutover and catch-up
+
+**Project goal:** collect raw JSONL and write immutable normalized parquet batches — nothing else.
+
+Normalizer state lives in `state/processed.json` (which raw JSONL files were normalized). Parquet batches live under `data/`. Raw JSONL is **never deleted** by the normalizer.
+
+**Never run two processes on `:9101`** (old converter loop + normalizer loop).
+
+### Cutover from legacy converter
+
+1. **Stop** `convert_parquet.py --loop` if still running.
+2. **Optional:** archive legacy daily rollups: `mv data data_legacy` (creates empty `data/` for batch layout).
+3. **Reset** `state/processed.json` if raw JSONL must be re-normalized into batch layout (old converter marked files processed but wrote `{day}.parquet`, not batch paths).
+4. Start `./venv/bin/python -u src/normalize_parquet.py --loop`.
+5. Verify 1:1 audit: each `raw/.../{time}.jsonl` eventually has `data/.../{date}/{time}.parquet`.
+
+### Manual catch-up (large backlog)
+
+```bash
+PYTHONPATH=src ./venv/bin/python -c "
+from normalizer.runner import normalize_once, collect_backlog_metrics
+from normalizer.paths import project_paths
+root, _, state, _ = project_paths()
+print('before', collect_backlog_metrics(project_root=root, state_path=state))
+print('batch', normalize_once())
+print('after', collect_backlog_metrics(project_root=root, state_path=state))
+"
+```
+
+Or: `./venv/bin/python src/normalize_parquet.py --once`
+
+Check backlog on `:9101`: `mdp_pipeline_parquet_raw_backlog_files`.
+
+### Re-normalize batches (schema fix)
+
+1. Stop `normalize_parquet.py --loop`.
+2. Delete target batch parquet files under `data/`.
+3. Remove matching paths from `state/processed.json`.
+4. Run `--once` or restart `--loop`.
+
+Immutable batches are write-once; there is no append race. Re-run overwrites the same batch path atomically.
+
+### Symptoms
+
+| Symptom | Likely cause |
+|---------|----------------|
+| Backlog not draining | Normalizer down; check `:9101` / `mdp_up` |
+| jsonl processed but no batch parquet | Old `processed.json` from legacy converter — reset state |
+| Grafana DuckDB panels stale | Panels may still point at legacy `{day}.parquet` paths — separate sprint |
 
 ---
 
@@ -92,7 +147,7 @@ collect → raw → parse → parquet → catalog → coverage/quality → metri
 2. **Collect** — adapter + `collect_*.py` + `run_*_collector.py` + dedicated metrics port
 3. **Raw** — JSONL under `raw/{exchange}/{category}/`, 60 s flush pattern
 4. **Parse** — `parse_*.py` row schema
-5. **Convert** — `convert_parquet.py` column map + `REGISTERED_SOURCES` routing
+5. **Normalize** — `src/normalizer/schemas.py` + `REGISTERED_SOURCES` routing in `normalizer/runner.py`
 6. **Catalog** — auto via `sync.py` if parquet exists under `data/`
 7. **Scanners** — `coverage_scanner.py` / `quality_validator.py` use `discover_metric_datasets()` (exchange-aware)
 8. **Prometheus** — scrape target in `monitoring/prometheus/prometheus.yml`
@@ -100,7 +155,7 @@ collect → raw → parse → parquet → catalog → coverage/quality → metri
 10. **Alerts** — `monitoring/grafana/provisioning/alerting/rules.yaml` + `monitoring/alerts/config.yaml`
 11. **Docs** — update `README.md` and this file only (no extra `.md` files)
 
-For Polymarket-style non-UBWA sources: implement health in adapter (reconnect, resubscribe, stall detection) — see `src/collectors/polymarket.py`.
+For Polymarket-style non-UBWA sources: implement health in adapter (reconnect, resubscribe, stall detection) — see `src/collectors/polymarket.py`. BTC 15m lifecycle: subscribe **15 min pre-window**, wait for **WS `market_resolved`** up to **5 min after window end**, then stop tracking (no Gamma poll in collector) — see `src/polymarket/lifecycle.py`.
 
 ---
 
@@ -111,15 +166,15 @@ For Polymarket-style non-UBWA sources: implement health in adapter (reconnect, r
 - **Metrics naming:** prefix `mdp_`; labels use snake_case.
 - **Grafana stat panels:** Prometheus gauges need `instant: true, range: false`.
 - **Multi-query tables:** use `label_join(..., "dataset", "/", "category", "symbol")` + `joinByField` on `dataset`.
-- **Pollers:** 300 s interval inside `convert_parquet.py`; do not add duplicate background threads without reason.
-- **Parquet catch-up:** never run `convert_once()` concurrently with `convert_parquet.py --loop` (append race). See README.
+- **Pollers:** derived/knowledge/catalog/coverage/quality run **outside** the normalizer unless explicitly requested.
+- **Parquet catch-up / reset:** see **Normalizer cutover and catch-up** above.
 - **Commits:** only when the user asks. Never force-push to main.
 
 ---
 
 ## Do not change without explicit request
 
-- Phase 1/2 core collection and parquet write semantics (`collect_raw.py`, core conversion in `convert_parquet.py`)
+- Phase 1/2 core collection semantics (`collect_raw.py`, collector flush pattern)
 - Binance / Polymarket symbol scope unless user asks (BTC-only is intentional)
 - Running terminals the user did not ask to restart
 
@@ -131,9 +186,12 @@ Safe to change when asked: monitoring dashboards, alert thresholds, catalog sync
 
 - **Local OSS only** at `http://localhost:3001` — not Grafana Cloud.
 - Datasource UID: `prometheus`
-- Dashboard folder: **Market Data Platform**
+- Dashboard folder: **PargaliIbrahim Canvas**
 - Do **not** add `GF_INSTALL_PLUGINS=frser-duckdb-datasource` — plugin 404 crashes Grafana.
+- **DuckDB analytics datasource:** use `monitoring/scripts/install_duckdb_plugin.sh` (MotherDuck plugin, unsigned). Grafana image must be `grafana/grafana:*-ubuntu` (not Alpine). Parquet paths in panel SQL: `/data/...` (mounted read-only).
 - After provisioning changes: `docker compose up -d grafana --force-recreate` from `monitoring/`.
+- **Provisioned dashboards** (`infra/monitoring/grafana/dashboards/*.json`): `allowUiUpdates: false` — edit JSON in repo, not Grafana UI (UI changes are overwritten every 30s).
+- **Personal dashboards** (e.g. Polymarket Monitor): create/save in Grafana UI only — **never** add a JSON file under `infra/monitoring/grafana/dashboards/`. `disableDeletion: true` keeps them if a file is removed.
 
 Key dashboards: `overview.json`, `market-intelligence.json`, `polymarket-collector-health.json`
 
@@ -147,7 +205,7 @@ Key dashboards: `overview.json`, `market-intelligence.json`, `polymarket-collect
 | Collector down | `mdp_up{service="market-data-platform-collector"} < 1` |
 | Orderbook collector down | `mdp_up{service="market-data-platform-orderbook"} < 1` |
 | Polymarket collector down | `mdp_up{service="market-data-platform-polymarket"} < 1` |
-| Converter down | `mdp_up{service="market-data-platform-converter"} < 1` |
+| Normalizer down | `mdp_up{service="market-data-platform-converter"} < 1` (scrape target `:9101`) |
 | Buffer capacity | `buffer_length / buffer_maxlen > 0.85` |
 | Parquet failed | `increase(mdp_pipeline_parquet_failed_conversions_total[15m])` |
 | Catalog stale | `time() - mdp_pipeline_catalog_last_sync_timestamp_seconds > 900` |
@@ -155,7 +213,7 @@ Key dashboards: `overview.json`, `market-intelligence.json`, `polymarket-collect
 | Coverage low | `min(mdp_coverage_percent{category="trades"}) < 95` |
 | Schema change | `increase(mdp_catalog_schema_changes_total[15m])` |
 
-Derived / cross / knowledge gauges export from **converter** (`:9101`).
+Derived / cross / knowledge are **not** exported by the normalizer; run separately if needed.
 
 ---
 
@@ -168,11 +226,9 @@ Derived / cross / knowledge gauges export from **converter** (`:9101`).
 ## Testing changes
 
 ```bash
-PYTHONPATH=src ./venv/bin/python -c "from catalog.sync import sync_catalog"
-PYTHONPATH=src ./venv/bin/python -c "from derive_polymarket import derive_polymarket_once"
-PYTHONPATH=src ./venv/bin/python src/run_agent.py brief
+PYTHONPATH=src ./venv/bin/python -c "from normalizer.runner import normalize_once; print(normalize_once())"
 curl -s localhost:9100/metrics | head
-curl -s localhost:9101/metrics | rg mdp_cross
+curl -s localhost:9101/metrics | rg mdp_pipeline_parquet
 docker logs mdp-grafana 2>&1 | rg -i provision
 ```
 
