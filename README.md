@@ -43,7 +43,7 @@ Derived, knowledge, catalog, and agent layers exist in the repo but are **out of
 | **Orderbook collector** (`:9102`) | BTCUSDT depth@100ms + 15 min snapshots |
 | **Polymarket collector** (`:9103`) | BTC 15m Up/Down — direct CLOB WebSocket |
 | **Normalizer** (`:9101`) | raw JSONL → immutable parquet batches (DuckDB writer) |
-| **Monitoring** | 11 Grafana dashboards, Prometheus alerts |
+| **Monitoring** | 6 Grafana dashboards, Prometheus alerts |
 | **Agent** | `run_agent.py brief` / `ask` — local, no LLM |
 
 **Symbols:** `BTCUSDT` (Binance), `BTC_15M` (Polymarket)
@@ -106,7 +106,7 @@ docker compose up -d
 | Grafana | http://localhost:3001 |
 | Prometheus | http://localhost:9090 |
 
-Open folder **PargaliIbrahim Canvas**. Key dashboards: **Overview**, **BTC Market Intelligence**, **Polymarket Collector Health**.
+Open folder **PargaliIbrahim Canvas**. Key dashboards: **Overview**, **Normalizer Health**, **Collector Health**.
 
 ### 4. Ask the agent
 
@@ -235,7 +235,7 @@ print(duckdb.connect().execute('''
 "
 ```
 
-Healthy pipeline: trade counts grow over time; normalizer keeps backlog near zero (see **Pipeline Health** dashboard).
+Healthy pipeline: trade counts grow over time; normalizer keeps backlog near zero (see **Normalizer Health** dashboard).
 
 ---
 
@@ -243,7 +243,9 @@ Healthy pipeline: trade counts grow over time; normalizer keeps backlog near zer
 
 **Dashboards** (folder **PargaliIbrahim Canvas**):
 
-Overview · Collector Health · Orderbook Collector Health · Polymarket Collector Health · Pipeline Health · Storage Health · Data Coverage · Data Quality · Metadata Catalog · AI Layer · **BTC Market Intelligence**
+Overview · Normalizer Health · Storage Health · Trades/Liq Collector Health · Orderbook Collector Health · Polymarket Collector Health
+
+Archived (not provisioned): `infra/monitoring/grafana/archive/` — catalog, coverage, quality, AI, market intelligence, legacy converter lifecycle.
 
 Alert rules are provisioned from `monitoring/grafana/provisioning/alerting/`. Threshold reference: `monitoring/alerts/config.yaml`.
 

@@ -72,7 +72,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_catalog_datasets_discovered",
+          "expr": "mdp_pipeline_catalog_datasets_discovered{service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -133,7 +133,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_catalog_metadata_extraction_failures_total",
+          "expr": "mdp_pipeline_catalog_metadata_extraction_failures_total{service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -195,7 +195,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_catalog_schema_columns{dataset_id=~\"$category:.*\"} == 1",
+          "expr": "mdp_catalog_schema_columns{dataset_id=~\"$category:.*\", service=\"market-data-platform-converter\"} == 1",
           "format": "table",
           "instant": true,
           "range": false,
@@ -293,7 +293,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_catalog_last_sync_timestamp_seconds * 1000",
+          "expr": "mdp_pipeline_catalog_last_sync_timestamp_seconds{service=\"market-data-platform-converter\"} * 1000",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -375,14 +375,14 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "label_join(mdp_catalog_dataset_rows{category=~\"$category\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_catalog_dataset_rows{category=~\"$category\", service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "A"
         },
         {
-          "expr": "label_join(mdp_catalog_dataset_files{category=~\"$category\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_catalog_dataset_files{category=~\"$category\", service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
@@ -457,7 +457,7 @@
     }
   ],
   "preload": false,
-  "refresh": "1m",
+  "refresh": "30s",
   "schemaVersion": 40,
   "tags": [
     "market-data-platform",
@@ -493,7 +493,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Market Data Platform — Metadata Catalog",
+  "title": "6) Metadata Catalog",
   "uid": "mdp-metadata-catalog",
   "version": 1,
   "weekStart": ""

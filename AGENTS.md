@@ -191,9 +191,10 @@ Safe to change when asked: monitoring dashboards, alert thresholds, catalog sync
 - **DuckDB analytics datasource:** use `monitoring/scripts/install_duckdb_plugin.sh` (MotherDuck plugin, unsigned). Grafana image must be `grafana/grafana:*-ubuntu` (not Alpine). Parquet paths in panel SQL: `/data/...` (mounted read-only).
 - After provisioning changes: `docker compose up -d grafana --force-recreate` from `monitoring/`.
 - **Provisioned dashboards** (`infra/monitoring/grafana/dashboards/*.json`): `allowUiUpdates: false` — edit JSON in repo, not Grafana UI (UI changes are overwritten every 30s).
+- **Archived dashboards** (`infra/monitoring/grafana/archive/`): not provisioned; restore to `dashboards/` only if a future tier is re-enabled.
 - **Personal dashboards** (e.g. Polymarket Monitor): create/save in Grafana UI only — **never** add a JSON file under `infra/monitoring/grafana/dashboards/`. `disableDeletion: true` keeps them if a file is removed.
 
-Key dashboards: `overview.json`, `market-intelligence.json`, `polymarket-collector-health.json`
+Key dashboards: `overview.json`, `pipeline-health.json` (Normalizer Health), `storage-health.json`, collector health dashboards. Archived tier dashboards live under `infra/monitoring/grafana/archive/`.
 
 ---
 

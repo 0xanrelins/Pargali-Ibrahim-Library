@@ -25,7 +25,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "All datasets — coverage percent, missing days/hours, time range.",
+      "description": "All datasets \u2014 coverage percent, missing days/hours, time range.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -147,35 +147,35 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "label_join(mdp_coverage_percent, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_coverage_percent{service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "A"
         },
         {
-          "expr": "label_join(mdp_coverage_missing_days_total, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_coverage_missing_days_total{service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "B"
         },
         {
-          "expr": "label_join(mdp_coverage_missing_hours_total, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_coverage_missing_hours_total{service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "C"
         },
         {
-          "expr": "label_join(mdp_coverage_first_timestamp_seconds * 1000, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_coverage_first_timestamp_seconds{service=\"market-data-platform-converter\"} * 1000, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "D"
         },
         {
-          "expr": "label_join(mdp_coverage_last_timestamp_seconds * 1000, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_coverage_last_timestamp_seconds{service=\"market-data-platform-converter\"} * 1000, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
@@ -286,7 +286,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_coverage_first_timestamp_seconds{category=\"$category\", symbol=\"$symbol\"} * 1000",
+          "expr": "mdp_coverage_first_timestamp_seconds{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"} * 1000",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -351,13 +351,13 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_coverage_percent{category=\"$category\", symbol=\"$symbol\"}",
+          "expr": "mdp_coverage_percent{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Coverage % — $category / $symbol",
+      "title": "Coverage % \u2014 $category / $symbol",
       "type": "gauge"
     },
     {
@@ -447,14 +447,14 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_coverage_hour_present{category=\"$category\", symbol=\"$symbol\", day=\"$day\"}",
+          "expr": "mdp_coverage_hour_present{category=\"$category\", symbol=\"$symbol\", day=\"$day\", service=\"market-data-platform-converter\"}",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Hour Coverage — $day",
+      "title": "Hour Coverage \u2014 $day",
       "transformations": [
         {
           "id": "organize",
@@ -542,7 +542,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_coverage_last_timestamp_seconds{category=\"$category\", symbol=\"$symbol\"} * 1000",
+          "expr": "mdp_coverage_last_timestamp_seconds{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"} * 1000",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -603,7 +603,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_coverage_missing_days_total{category=\"$category\", symbol=\"$symbol\"}",
+          "expr": "mdp_coverage_missing_days_total{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -699,14 +699,14 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_coverage_day_present{category=\"$category\", symbol=\"$symbol\"}",
+          "expr": "mdp_coverage_day_present{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"}",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Day Coverage — $category / $symbol",
+      "title": "Day Coverage \u2014 $category / $symbol",
       "transformations": [
         {
           "id": "organize",
@@ -797,7 +797,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_coverage_missing_hours_total{category=\"$category\", symbol=\"$symbol\"}",
+          "expr": "mdp_coverage_missing_hours_total{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -873,21 +873,21 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "label_join(mdp_coverage_missing_days_total, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_coverage_missing_days_total{service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "A"
         },
         {
-          "expr": "label_join(mdp_coverage_missing_hours_total, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_coverage_missing_hours_total{service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "B"
         },
         {
-          "expr": "label_join(mdp_coverage_percent, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_coverage_percent{service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
@@ -1028,7 +1028,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Market Data Platform — Data Coverage",
+  "title": "4) Data Coverage",
   "uid": "mdp-data-coverage",
   "version": 7
 }

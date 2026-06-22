@@ -72,7 +72,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ai_datasets_total",
+          "expr": "mdp_ai_datasets_total{service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -133,7 +133,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ai_datasets_indexed",
+          "expr": "mdp_ai_datasets_indexed{service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -194,7 +194,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ai_datasets_total - mdp_ai_datasets_indexed",
+          "expr": "mdp_ai_datasets_total{service=\"market-data-platform-converter\"} - mdp_ai_datasets_indexed{service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -256,7 +256,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ai_last_index_run_timestamp_seconds * 1000",
+          "expr": "mdp_ai_last_index_run_timestamp_seconds{service=\"market-data-platform-converter\"} * 1000",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -316,7 +316,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "count by (status) (mdp_ai_indexing_status == 1)",
+          "expr": "count by (status) (mdp_ai_indexing_status{service=\"market-data-platform-converter\"} == 1)",
           "instant": true,
           "legendFormat": "{{status}}",
           "range": false,
@@ -416,7 +416,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_ai_indexing_status == 1",
+          "expr": "mdp_ai_indexing_status{service=\"market-data-platform-converter\"} == 1",
           "format": "table",
           "instant": true,
           "range": false,
@@ -475,7 +475,7 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "Section 7 infrastructure only — **no LLM/indexer connected yet**. All datasets start as `pending`. Future indexer calls `catalog.ai_layer.mark_dataset_indexed()` to update DuckDB `ai_metadata` and metrics.\n\nCatalog records: **`catalog/catalog.duckdb`** → `ai_metadata` table.",
+        "content": "Section 7 infrastructure only \u2014 **no LLM/indexer connected yet**. All datasets start as `pending`. Future indexer calls `catalog.ai_layer.mark_dataset_indexed()` to update DuckDB `ai_metadata` and metrics.\n\nCatalog records: **`catalog/catalog.duckdb`** \u2192 `ai_metadata` table.",
         "mode": "markdown"
       },
       "pluginVersion": "11.5.2",
@@ -500,7 +500,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Market Data Platform — AI Layer",
+  "title": "9) AI Layer",
   "uid": "mdp-ai-layer",
   "version": 1,
   "weekStart": ""

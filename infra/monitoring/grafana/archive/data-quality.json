@@ -135,14 +135,14 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "label_join(mdp_quality_score, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_quality_score{service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "A"
         },
         {
-          "expr": "label_join(mdp_quality_rows_validated, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_quality_rows_validated{service=\"market-data-platform-converter\"}, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
@@ -256,7 +256,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "label_join(mdp_quality_validation_failures > 0, \"dataset\", \"/\", \"category\", \"symbol\")",
+          "expr": "label_join(mdp_quality_validation_failures{service=\"market-data-platform-converter\"} > 0, \"dataset\", \"/\", \"category\", \"symbol\")",
           "format": "table",
           "instant": true,
           "range": false,
@@ -356,13 +356,13 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_quality_score{category=\"$category\", symbol=\"$symbol\"}",
+          "expr": "mdp_quality_score{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Quality Score — $category / $symbol",
+      "title": "Quality Score \u2014 $category / $symbol",
       "type": "gauge"
     },
     {
@@ -417,7 +417,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_quality_rows_validated{category=\"$category\", symbol=\"$symbol\"}",
+          "expr": "mdp_quality_rows_validated{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"}",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -482,7 +482,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "sum(mdp_quality_validation_failures{category=\"$category\", symbol=\"$symbol\"})",
+          "expr": "sum(mdp_quality_validation_failures{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"})",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -584,14 +584,14 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_quality_validation_failures{category=\"$category\", symbol=\"$symbol\"}",
+          "expr": "mdp_quality_validation_failures{category=\"$category\", symbol=\"$symbol\", service=\"market-data-platform-converter\"}",
           "format": "table",
           "instant": true,
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Validation Failures — $category / $symbol",
+      "title": "Validation Failures \u2014 $category / $symbol",
       "transformations": [
         {
           "id": "organize",
@@ -681,7 +681,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Market Data Platform — Data Quality",
+  "title": "5) Data Quality",
   "uid": "mdp-data-quality",
   "version": 1,
   "weekStart": ""

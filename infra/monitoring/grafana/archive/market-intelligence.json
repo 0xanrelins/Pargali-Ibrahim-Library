@@ -1,6 +1,6 @@
 {
   "uid": "mdp-market-intelligence",
-  "title": "Market Data Platform — BTC Market Intelligence",
+  "title": "9) BTC Market Intelligence",
   "tags": ["market-data-platform", "phase-3", "polymarket", "intelligence", "btc"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -401,6 +401,7 @@
           "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 }
         }
       }
+    },
     {
       "id": 19,
       "type": "row",

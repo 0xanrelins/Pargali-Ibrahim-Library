@@ -73,11 +73,11 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_raw_last_flush_timestamp_seconds * 1000",
+          "expr": "max(mdp_pipeline_raw_last_flush_timestamp_seconds{service=~\"market-data-platform-(collector|orderbook|polymarket)\"}) * 1000",
           "refId": "A"
         }
       ],
-      "title": "Raw — Last Flush",
+      "title": "Raw \u2014 Last Flush",
       "type": "stat"
     },
     {
@@ -133,11 +133,11 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_raw_last_flush_duration_seconds",
+          "expr": "max(mdp_pipeline_raw_last_flush_duration_seconds{service=~\"market-data-platform-(collector|orderbook|polymarket)\"})",
           "refId": "A"
         }
       ],
-      "title": "Raw — Last Flush Duration",
+      "title": "Raw \u2014 Last Flush Duration",
       "type": "stat"
     },
     {
@@ -191,11 +191,11 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_parquet_last_batch_files_processed",
+          "expr": "mdp_pipeline_parquet_last_batch_files_processed{service=\"market-data-platform-converter\"}",
           "refId": "A"
         }
       ],
-      "title": "Parquet — Last Batch Files",
+      "title": "Parquet \u2014 Last Batch Files",
       "type": "stat"
     },
     {
@@ -251,11 +251,11 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_parquet_last_batch_duration_seconds",
+          "expr": "mdp_pipeline_parquet_last_batch_duration_seconds{service=\"market-data-platform-converter\"}",
           "refId": "A"
         }
       ],
-      "title": "Parquet — Last Batch Duration",
+      "title": "Parquet \u2014 Last Batch Duration",
       "type": "stat"
     },
     {
@@ -342,7 +342,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "sum by (category) (rate(mdp_pipeline_raw_files_written_total[5m]))",
+          "expr": "sum by (category) (rate(mdp_pipeline_raw_files_written_total{service=~\"market-data-platform-(collector|orderbook|polymarket)\"}[5m]))",
           "legendFormat": "{{category}}",
           "refId": "A"
         }
@@ -434,7 +434,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "sum by (category) (rate(mdp_pipeline_raw_bytes_written_total[5m]))",
+          "expr": "sum by (category) (rate(mdp_pipeline_raw_bytes_written_total{service=~\"market-data-platform-(collector|orderbook|polymarket)\"}[5m]))",
           "legendFormat": "{{category}}",
           "refId": "A"
         }
@@ -525,7 +525,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_parquet_files_processed_total",
+          "expr": "mdp_pipeline_parquet_files_processed_total{service=\"market-data-platform-converter\"}",
           "legendFormat": "processed",
           "refId": "A"
         }
@@ -617,190 +617,13 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "sum by (reason) (rate(mdp_pipeline_parquet_failed_conversions_total[5m]))",
+          "expr": "sum by (reason) (rate(mdp_pipeline_parquet_failed_conversions_total{service=\"market-data-platform-converter\"}[5m]))",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
       ],
       "title": "Parquet Conversion Failures",
       "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "noValue": "0 (stub — Section 6)",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 5,
-        "x": 0,
-        "y": 20
-      },
-      "id": 9,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.2",
-      "targets": [
-        {
-          "expr": "mdp_pipeline_catalog_datasets_discovered",
-          "refId": "A"
-        }
-      ],
-      "title": "Catalog — Datasets",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "noValue": "Not synced (stub)",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "dateTimeAsIso"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 5,
-        "y": 20
-      },
-      "id": 10,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.2",
-      "targets": [
-        {
-          "expr": "mdp_pipeline_catalog_last_sync_timestamp_seconds * 1000",
-          "refId": "A"
-        }
-      ],
-      "title": "Catalog — Last Sync",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 11,
-        "y": 20
-      },
-      "id": 11,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.5.2",
-      "targets": [
-        {
-          "expr": "mdp_pipeline_catalog_metadata_extraction_failures_total",
-          "refId": "A"
-        }
-      ],
-      "title": "Catalog — Extraction Failures",
-      "type": "stat"
     },
     {
       "datasource": {
@@ -892,12 +715,12 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_parquet_raw_backlog_files",
+          "expr": "mdp_pipeline_parquet_raw_backlog_files{service=\"market-data-platform-converter\"}",
           "legendFormat": "{{category}}",
           "refId": "A"
         }
       ],
-      "title": "Parquet — Raw Backlog (unprocessed files)",
+      "title": "Parquet \u2014 Raw Backlog (unprocessed files)",
       "type": "timeseries"
     }
   ],
@@ -907,7 +730,7 @@
   "tags": [
     "market-data-platform",
     "phase-3",
-    "pipeline"
+    "normalizer"
   ],
   "templating": {
     "list": []
@@ -918,8 +741,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Market Data Platform — Pipeline Health",
+  "title": "2) Normalizer Health",
   "uid": "mdp-pipeline-health",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
