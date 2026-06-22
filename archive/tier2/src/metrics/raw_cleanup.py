@@ -45,6 +45,38 @@ def _remove_empty_dirs(root: Path) -> None:
             path.rmdir()
 
 
+def count_raw_cleanup_states(
+    *,
+    project_root: Path,
+    raw_root: Path,
+    state_path: Path,
+    grace_hours: float = DEFAULT_GRACE_HOURS,
+) -> tuple[int, int]:
+    """Return (awaiting_cleanup, pending_grace) counts for processed raw files still on disk."""
+    processed_files = load_processed_files(state_path)
+    cutoff_ts = time.time() - (grace_hours * 3600)
+    awaiting_cleanup = 0
+    pending_grace = 0
+
+    if not raw_root.exists():
+        return awaiting_cleanup, pending_grace
+
+    for jsonl_path in raw_root.rglob("*.jsonl"):
+        rel_path = _relative_path(jsonl_path, project_root)
+        if rel_path not in processed_files:
+            continue
+        try:
+            file_mtime = jsonl_path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if file_mtime <= cutoff_ts:
+            awaiting_cleanup += 1
+        else:
+            pending_grace += 1
+
+    return awaiting_cleanup, pending_grace
+
+
 def cleanup_processed_raw(
     *,
     project_root: Path,
@@ -76,13 +108,17 @@ def cleanup_processed_raw(
             stats["skipped_unprocessed"] += 1
             continue
 
-        file_mtime = jsonl_path.stat().st_mtime
-        if file_mtime > cutoff_ts:
+        try:
+            file_stat = jsonl_path.stat()
+        except FileNotFoundError:
+            continue
+
+        if file_stat.st_mtime > cutoff_ts:
             stats["skipped_too_new"] += 1
             continue
 
         stats["candidates"] += 1
-        file_size = jsonl_path.stat().st_size
+        file_size = file_stat.st_size
 
         if dry_run:
             logger.info("Dry-run: would delete %s (%s bytes)", rel_path, file_size)

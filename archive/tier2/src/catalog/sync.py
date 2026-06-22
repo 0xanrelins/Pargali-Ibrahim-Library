@@ -157,6 +157,28 @@ _seen_datasets: set[tuple[str, str, str]] = set()
 _seen_schema_columns: set[tuple[str, str, str]] = set()
 
 
+def _delete_orphaned_datasets(connection, synced_ids: set[str]) -> None:
+    """Remove catalog rows for datasets no longer present on disk."""
+    if synced_ids:
+        placeholders = ", ".join("?" for _ in synced_ids)
+        orphan_filter = f"dataset_id NOT IN ({placeholders})"
+        params = list(synced_ids)
+    else:
+        orphan_filter = "1=1"
+        params = []
+
+    for table in ("ai_metadata", "file_stats", "schema_registry"):
+        connection.execute(f"DELETE FROM {table} WHERE {orphan_filter}", params)
+
+    if synced_ids:
+        connection.execute(
+            f"DELETE FROM datasets WHERE dataset_id NOT IN ({placeholders})",
+            list(synced_ids),
+        )
+    else:
+        connection.execute("DELETE FROM datasets")
+
+
 def sync_catalog(*, config: CatalogConfig | None = None) -> int:
     """Scan parquet datasets and upsert catalog tables. Returns datasets synced."""
     cfg = config or load_catalog_config()
@@ -254,13 +276,9 @@ def sync_catalog(*, config: CatalogConfig | None = None) -> int:
             ensure_dataset_ai_metadata(connection, key.dataset_id)
 
         if synced_ids:
-            placeholders = ", ".join("?" for _ in synced_ids)
-            connection.execute(
-                f"DELETE FROM datasets WHERE dataset_id NOT IN ({placeholders})",
-                list(synced_ids),
-            )
+            _delete_orphaned_datasets(connection, synced_ids)
         else:
-            connection.execute("DELETE FROM datasets")
+            _delete_orphaned_datasets(connection, set())
 
         dataset_count = connection.execute("SELECT COUNT(*) FROM datasets").fetchone()[0]
     finally:

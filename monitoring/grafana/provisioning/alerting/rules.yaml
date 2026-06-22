@@ -210,7 +210,7 @@ groups:
                 type: prometheus
                 uid: prometheus
               editorMode: code
-              expr: mdp_up{service="market-data-platform-converter"}
+              expr: mdp_up{service="market-data-platform-normalizer"}
               instant: true
               range: false
               refId: A
@@ -241,7 +241,7 @@ groups:
           severity: critical
         annotations:
           summary: Normalizer Prometheus exporter is down or unreachable
-          description: mdp_up for market-data-platform-converter is below 1.
+          description: mdp_up for market-data-platform-normalizer is below 1.
 
       - uid: mdp-buffer-capacity
         title: MDP Buffer Near Capacity

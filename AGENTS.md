@@ -6,15 +6,19 @@ Guidance for AI coding agents working in this repository.
 
 ## Project summary
 
-**BTC Intelligence Platform (BTC Suite)** — self-hosted, single-node, BTC-only research system.
+**BTC Collector Pipeline** — self-hosted, single-node, BTC-only.
 
-Five layers: **Raw → Normalized → Derived → Knowledge → Agents**
+```
+Collector → raw JSONL → DuckDB Normalizer → immutable parquet batches
+```
 
-Data sources today:
+Data sources:
 - **Binance USDT-M perp** — `BTCUSDT` (trades, liquidations, orderbook)
 - **Polymarket** — `BTC_15M` 15-minute Up/Down (direct CLOB WebSocket)
 
-Phases 1–3 plus Polymarket, derived metrics, knowledge, and agent v1 are implemented. Do not rewrite collection or conversion semantics unless explicitly requested.
+Do not rewrite collection or normalizer semantics unless explicitly requested.
+
+Optional future tiers (derived, knowledge, agent) are under `archive/tier2/` — not loaded at runtime.
 
 ---
 
@@ -34,24 +38,18 @@ Phases 1–3 plus Polymarket, derived metrics, knowledge, and agent v1 are imple
 | `src/normalize_parquet.py` | Normalizer CLI (`--once` / `--loop`) on `:9101` |
 | `src/normalizer/` | DuckDB writer, schemas, paths, runner (1 JSONL → 1 parquet) |
 | `src/convert_parquet.py` | **Deprecated** — delegates to `normalize_parquet.py` |
-| `src/derive_polymarket.py` | PM derived metrics (Tier 1–2) |
-| `src/derive_cross_market.py` | PM–perp divergence (Tier 3) |
-| `src/knowledge/btc_suite.py` | Knowledge scores (Layer 4) |
-| `src/agents/btc_analyst.py` | Rule-based analyst (Layer 5) |
-| `src/run_agent.py` | Agent CLI (`brief`, `ask`) |
+| `archive/tier2/` | Derived, knowledge, agent, catalog, coverage, quality (not runtime) |
 | `src/polymarket/discovery.py` | Gamma API — active BTC 15m market |
 | `src/metrics/` | Prometheus registries (`mdp_*`) |
-| `src/catalog/` | DuckDB schema, sync, AI metadata hooks |
 | `monitoring/` | Docker Compose + provisioning |
 | `infra/monitoring/grafana/dashboards/` | Dashboard JSON source of truth |
-| `catalog/config.yaml` | Catalog DB path and data roots |
 | `monitoring/alerts/config.yaml` | Alert threshold reference (not loaded at runtime) |
 
 ---
 
 ## Runtime processes
 
-Four Python processes + Docker for full observability:
+Four Python processes + Docker for observability:
 
 ```bash
 ./venv/bin/python -u src/run_collector.py               # :9100
@@ -61,13 +59,7 @@ Four Python processes + Docker for full observability:
 cd monitoring && docker compose up -d                     # Grafana :3001
 ```
 
-Agent (on-demand, no port):
-
-```bash
-PYTHONPATH=src ./venv/bin/python src/run_agent.py brief
-```
-
-Run Python with `PYTHONPATH=src` or from project root using `./venv/bin/python src/...` (imports use `from metrics...`, `from catalog...`).
+Run Python with `PYTHONPATH=src` or from project root using `./venv/bin/python src/...`.
 
 ---
 
@@ -140,20 +132,18 @@ Immutable batches are write-once; there is no append race. Re-run overwrites the
 Every new category must flow through **all** layers:
 
 ```text
-collect → raw → parse → parquet → catalog → coverage/quality → metrics → Grafana → docs
+collect → raw → parse → normalize → metrics → Grafana → docs
 ```
 
 1. **Registry** — `src/datasets.py` (`REGISTERED_SOURCES`, categories)
 2. **Collect** — adapter + `collect_*.py` + `run_*_collector.py` + dedicated metrics port
 3. **Raw** — JSONL under `raw/{exchange}/{category}/`, 60 s flush pattern
 4. **Parse** — `parse_*.py` row schema
-5. **Normalize** — `src/normalizer/schemas.py` + `REGISTERED_SOURCES` routing in `normalizer/runner.py`
-6. **Catalog** — auto via `sync.py` if parquet exists under `data/`
-7. **Scanners** — `coverage_scanner.py` / `quality_validator.py` use `discover_metric_datasets()` (exchange-aware)
-8. **Prometheus** — scrape target in `monitoring/prometheus/prometheus.yml`
-9. **Grafana** — dashboard JSON in `infra/monitoring/grafana/dashboards/`, recreate Grafana
-10. **Alerts** — `monitoring/grafana/provisioning/alerting/rules.yaml` + `monitoring/alerts/config.yaml`
-11. **Docs** — update `README.md` and this file only (no extra `.md` files)
+5. **Normalize** — `src/normalizer/schemas.py` + `normalizer/runner.py`
+6. **Prometheus** — scrape target in `monitoring/prometheus/prometheus.yml`
+7. **Grafana** — dashboard JSON in `infra/monitoring/grafana/dashboards/`
+8. **Alerts** — `monitoring/grafana/provisioning/alerting/rules.yaml`
+9. **Docs** — update `README.md` and this file only
 
 For Polymarket-style non-UBWA sources: implement health in adapter (reconnect, resubscribe, stall detection) — see `src/collectors/polymarket.py`. BTC 15m lifecycle: subscribe **15 min pre-window**, wait for **WS `market_resolved`** up to **5 min after window end**, then stop tracking (no Gamma poll in collector) — see `src/polymarket/lifecycle.py`.
 
@@ -166,7 +156,7 @@ For Polymarket-style non-UBWA sources: implement health in adapter (reconnect, r
 - **Metrics naming:** prefix `mdp_`; labels use snake_case.
 - **Grafana stat panels:** Prometheus gauges need `instant: true, range: false`.
 - **Multi-query tables:** use `label_join(..., "dataset", "/", "category", "symbol")` + `joinByField` on `dataset`.
-- **Pollers:** derived/knowledge/catalog/coverage/quality run **outside** the normalizer unless explicitly requested.
+- **Pollers:** storage metrics scan (300 s) runs inside `normalize_parquet.py --loop` on `:9101`.
 - **Parquet catch-up / reset:** see **Normalizer cutover and catch-up** above.
 - **Commits:** only when the user asks. Never force-push to main.
 
@@ -178,7 +168,9 @@ For Polymarket-style non-UBWA sources: implement health in adapter (reconnect, r
 - Binance / Polymarket symbol scope unless user asks (BTC-only is intentional)
 - Running terminals the user did not ask to restart
 
-Safe to change when asked: monitoring dashboards, alert thresholds, catalog sync, derived/knowledge metrics, agent templates, documentation.
+Safe to change when asked: monitoring dashboards, alert thresholds, documentation.
+
+Do not re-enable `archive/tier2/` in the normalizer without an explicit request.
 
 ---
 
@@ -206,15 +198,12 @@ Key dashboards: `overview.json`, `pipeline-health.json` (Normalizer Health), `st
 | Collector down | `mdp_up{service="market-data-platform-collector"} < 1` |
 | Orderbook collector down | `mdp_up{service="market-data-platform-orderbook"} < 1` |
 | Polymarket collector down | `mdp_up{service="market-data-platform-polymarket"} < 1` |
-| Normalizer down | `mdp_up{service="market-data-platform-converter"} < 1` (scrape target `:9101`) |
+| Normalizer down | `mdp_up{service="market-data-platform-normalizer"} < 1` |
 | Buffer capacity | `buffer_length / buffer_maxlen > 0.85` |
 | Parquet failed | `increase(mdp_pipeline_parquet_failed_conversions_total[15m])` |
-| Catalog stale | `time() - mdp_pipeline_catalog_last_sync_timestamp_seconds > 900` |
 | Disk high | `mdp_storage_used_percent > 85` |
-| Coverage low | `min(mdp_coverage_percent{category="trades"}) < 95` |
-| Schema change | `increase(mdp_catalog_schema_changes_total[15m])` |
 
-Derived / cross / knowledge are **not** exported by the normalizer; run separately if needed.
+Derived / cross / knowledge are archived under `archive/tier2/` — not exported by the normalizer.
 
 ---
 

@@ -191,7 +191,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_parquet_last_batch_files_processed{service=\"market-data-platform-converter\"}",
+          "expr": "mdp_pipeline_parquet_last_batch_files_processed{service=\"market-data-platform-normalizer\"}",
           "refId": "A"
         }
       ],
@@ -251,7 +251,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_parquet_last_batch_duration_seconds{service=\"market-data-platform-converter\"}",
+          "expr": "mdp_pipeline_parquet_last_batch_duration_seconds{service=\"market-data-platform-normalizer\"}",
           "refId": "A"
         }
       ],
@@ -525,7 +525,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_parquet_files_processed_total{service=\"market-data-platform-converter\"}",
+          "expr": "mdp_pipeline_parquet_files_processed_total{service=\"market-data-platform-normalizer\"}",
           "legendFormat": "processed",
           "refId": "A"
         }
@@ -617,7 +617,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "sum by (reason) (rate(mdp_pipeline_parquet_failed_conversions_total{service=\"market-data-platform-converter\"}[5m]))",
+          "expr": "sum by (reason) (rate(mdp_pipeline_parquet_failed_conversions_total{service=\"market-data-platform-normalizer\"}[5m]))",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -715,7 +715,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "mdp_pipeline_parquet_raw_backlog_files{service=\"market-data-platform-converter\"}",
+          "expr": "mdp_pipeline_parquet_raw_backlog_files{service=\"market-data-platform-normalizer\"}",
           "legendFormat": "{{category}}",
           "refId": "A"
         }

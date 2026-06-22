@@ -3,9 +3,10 @@ apiVersion: 1
 providers:
   - name: market-data-platform
     orgId: 1
-    folder: Market Data Platform
+    folder: PargaliIbrahim Canvas
+    folderUid: efpdw9kwk1k3kb
     type: file
-    disableDeletion: false
+    disableDeletion: true
     updateIntervalSeconds: 30
     allowUiUpdates: false
     options:

@@ -233,7 +233,7 @@
       },
       "targets": [
         {
-          "expr": "mdp_up{service=\"market-data-platform-converter\"}",
+          "expr": "mdp_up{service=\"market-data-platform-normalizer\"}",
           "refId": "A",
           "instant": true,
           "range": false
@@ -541,7 +541,7 @@
       },
       "targets": [
         {
-          "expr": "sum(mdp_pipeline_parquet_raw_backlog_files{service=\"market-data-platform-converter\"})",
+          "expr": "sum(mdp_pipeline_parquet_raw_backlog_files{service=\"market-data-platform-normalizer\"})",
           "refId": "A",
           "instant": true,
           "range": false

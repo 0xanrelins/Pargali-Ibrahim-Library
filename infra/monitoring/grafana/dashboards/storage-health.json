@@ -1,20 +1,42 @@
 {
   "uid": "mdp-storage-health",
-  "title": "Market Data Platform — Storage Health",
-  "tags": ["market-data-platform", "phase-3", "storage"],
+  "title": "3) Storage Health",
+  "tags": [
+    "market-data-platform",
+    "phase-3",
+    "storage"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 3,
   "refresh": "1m",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "panels": [
     {
       "id": 1,
       "type": "gauge",
       "title": "Disk Used %",
-      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "mdp_storage_used_percent", "refId": "A", "instant": true, "range": false }],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "mdp_storage_used_percent{service=\"market-data-platform-normalizer\"}",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
@@ -23,74 +45,224 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 70 },
-              { "color": "red", "value": 85 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 70
+              },
+              {
+                "color": "red",
+                "value": 85
+              }
             ]
           }
         }
       },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Free Disk Space",
-      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "mdp_storage_free_bytes", "refId": "A", "instant": true, "range": false }],
-      "fieldConfig": { "defaults": { "unit": "bytes" } },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "mdp_storage_free_bytes{service=\"market-data-platform-normalizer\"}",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 3,
       "type": "stat",
       "title": "Raw Files",
-      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "mdp_storage_raw_file_count", "refId": "A", "instant": true, "range": false }],
-      "fieldConfig": { "defaults": { "decimals": 0, "noValue": "0" } },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "mdp_storage_raw_file_count{service=\"market-data-platform-normalizer\"}",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 4,
       "type": "stat",
       "title": "Parquet Files",
-      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "mdp_storage_parquet_file_count", "refId": "A", "instant": true, "range": false }],
-      "fieldConfig": { "defaults": { "decimals": 0, "noValue": "0" } },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "mdp_storage_parquet_file_count{service=\"market-data-platform-normalizer\"}",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 5,
       "type": "stat",
       "title": "Raw Storage",
-      "gridPos": { "x": 8, "y": 4, "w": 8, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "mdp_storage_total_bytes{path=\"raw\"}", "refId": "A", "instant": true, "range": false }],
-      "fieldConfig": { "defaults": { "unit": "bytes" } },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "gridPos": {
+        "x": 8,
+        "y": 4,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "mdp_storage_total_bytes{path=\"raw\", service=\"market-data-platform-normalizer\"}",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 6,
       "type": "stat",
       "title": "Parquet Storage",
-      "gridPos": { "x": 16, "y": 4, "w": 8, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "mdp_storage_total_bytes{path=\"data\"}", "refId": "A", "instant": true, "range": false }],
-      "fieldConfig": { "defaults": { "unit": "bytes" } },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "gridPos": {
+        "x": 16,
+        "y": 4,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "mdp_storage_total_bytes{path=\"data\", service=\"market-data-platform-normalizer\"}",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 7,
       "type": "timeseries",
       "title": "Storage Total (raw vs data)",
-      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
         {
-          "expr": "mdp_storage_total_bytes",
+          "expr": "mdp_storage_total_bytes{service=\"market-data-platform-normalizer\"}",
           "legendFormat": "{{path}}",
           "refId": "A"
         }
@@ -98,7 +270,10 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
         }
       }
     },
@@ -106,11 +281,19 @@
       "id": 8,
       "type": "timeseries",
       "title": "Daily Growth (24h window)",
-      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
         {
-          "expr": "mdp_storage_daily_growth_bytes",
+          "expr": "mdp_storage_daily_growth_bytes{service=\"market-data-platform-normalizer\"}",
           "legendFormat": "{{path}}",
           "refId": "A"
         }
@@ -118,7 +301,10 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
         }
       }
     },
@@ -126,11 +312,19 @@
       "id": 9,
       "type": "timeseries",
       "title": "Largest Datasets by Symbol",
-      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
         {
-          "expr": "mdp_storage_largest_dataset_bytes > 0",
+          "expr": "mdp_storage_largest_dataset_bytes{service=\"market-data-platform-normalizer\"} > 0",
           "legendFormat": "{{category}}/{{symbol}}",
           "refId": "A"
         }
@@ -138,11 +332,18 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
-          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
         }
       }
     }
   ],
-  "templating": { "list": [] },
-  "annotations": { "list": [] }
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
 }

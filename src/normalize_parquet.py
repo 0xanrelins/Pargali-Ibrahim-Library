@@ -9,6 +9,8 @@ import signal
 import time
 
 from metrics.exporter import DEFAULT_PIPELINE_METRICS_PORT, start_exporter
+from metrics.storage_scanner import collect_storage_metrics, start_storage_poller
+from normalizer.paths import project_paths
 from normalizer.runner import NORMALIZE_INTERVAL_SEC, normalize_once
 
 logger = logging.getLogger(__name__)
@@ -40,22 +42,33 @@ def run_loop() -> None:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    project_root, data_root, _, _ = project_paths()
+    raw_root = project_root / "raw"
+
     start_exporter(port=DEFAULT_PIPELINE_METRICS_PORT)
+    storage_poller = start_storage_poller(
+        project_root=project_root,
+        raw_root=raw_root,
+        data_root=data_root,
+    )
     logger.info(
         "Prometheus normalizer metrics: http://127.0.0.1:%s/metrics",
         DEFAULT_PIPELINE_METRICS_PORT,
     )
     logger.info("Starting normalizer loop (interval=%ss)", NORMALIZE_INTERVAL_SEC)
 
-    while not stop_requested:
-        stats = normalize_once()
-        log_stats(stats, label="Normalize batch complete")
+    try:
+        while not stop_requested:
+            stats = normalize_once()
+            log_stats(stats, label="Normalize batch complete")
 
-        if stop_requested:
-            break
+            if stop_requested:
+                break
 
-        logger.info("Next normalize batch in %s seconds", NORMALIZE_INTERVAL_SEC)
-        sleep_until_stop(NORMALIZE_INTERVAL_SEC)
+            logger.info("Next normalize batch in %s seconds", NORMALIZE_INTERVAL_SEC)
+            sleep_until_stop(NORMALIZE_INTERVAL_SEC)
+    finally:
+        storage_poller.stop()
 
     logger.info("Normalizer loop stopped")
 
@@ -93,6 +106,12 @@ def main() -> int:
         return 0
 
     start_exporter(port=DEFAULT_PIPELINE_METRICS_PORT)
+    project_root, data_root, _, _ = project_paths()
+    collect_storage_metrics(
+        project_root=project_root,
+        raw_root=project_root / "raw",
+        data_root=data_root,
+    )
     stats = normalize_once()
     log_stats(stats, label="Normalize complete")
     return 0

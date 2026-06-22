@@ -546,7 +546,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "100 * mdp_ubwa_stream_buffer_length / clamp_min(mdp_ubwa_stream_buffer_maxlen, 1)",
+          "expr": "100 * mdp_ubwa_stream_buffer_length{service=\"market-data-platform-orderbook\"} / clamp_min(mdp_ubwa_stream_buffer_maxlen{service=\"market-data-platform-orderbook\"}, 1)",
           "refId": "A"
         }
       ],
@@ -810,7 +810,7 @@
       "pluginVersion": "11.5.2",
       "targets": [
         {
-          "expr": "sum by (signal) (rate(mdp_ubwa_stream_signal_total[5m]))",
+          "expr": "sum by (signal) (rate(mdp_ubwa_stream_signal_total{service=\"market-data-platform-orderbook\"}[5m]))",
           "legendFormat": "{{signal}}",
           "refId": "A"
         }
@@ -1212,7 +1212,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Market Data Platform \u2014 Orderbook Collector Health",
+  "title": "8) Collectors - Orderbook Collector Health",
   "uid": "mdp-orderbook-collector-health",
   "version": 2,
   "weekStart": ""

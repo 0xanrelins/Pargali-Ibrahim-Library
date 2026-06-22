@@ -15,3 +15,13 @@ datasources:
     access: proxy
     url: http://loki:3100
     editable: false
+
+  # In-memory DuckDB; query parquet via read_parquet('/data/...') in panel SQL.
+  - name: DuckDB
+    uid: duckdb
+    type: motherduck-duckdb-datasource
+    access: proxy
+    editable: true
+    jsonData:
+      path: ""
+      initSql: ""

@@ -1211,7 +1211,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Market Data Platform — Trades & Liq Collector Health",
+  "title": "8) Collectors - Trades & Liq Collector Health",
   "uid": "mdp-collector-health",
   "version": 3,
   "weekStart": ""

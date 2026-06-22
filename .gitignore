@@ -20,3 +20,5 @@ state/**
 catalog/*.duckdb
 catalog/*.duckdb.wal
 monitoring/.env
+monitoring/grafana/plugins/motherduck-duckdb-datasource/
+data_legacy/

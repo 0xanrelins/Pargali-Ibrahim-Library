@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING
 
 from collectors.base import CollectorAdapter, CollectorMetrics, CollectorStatus
 from datasets import POLYMARKET
+
+if TYPE_CHECKING:
+    from polymarket.discovery import Btc15mMarket
 
 
 class PolymarketAdapter(CollectorAdapter):
@@ -20,6 +23,7 @@ class PolymarketAdapter(CollectorAdapter):
         self._subscription_count = 0
         self._last_message_timestamp: float | None = None
         self._active_slug: str | None = None
+        self._active_slugs: list[str] = []
         self._active_window_timestamp: int | None = None
         self._token_ids: tuple[str, ...] = ()
 
@@ -49,9 +53,39 @@ class PolymarketAdapter(CollectorAdapter):
         window_timestamp: int,
         token_ids: tuple[str, ...],
     ) -> None:
+        self.set_markets_single(slug=slug, window_timestamp=window_timestamp, token_ids=token_ids)
+
+    def set_markets_single(
+        self,
+        *,
+        slug: str,
+        window_timestamp: int,
+        token_ids: tuple[str, ...],
+    ) -> None:
+        self._active_slugs = [slug]
         self._active_slug = slug
         self._active_window_timestamp = window_timestamp
         self._token_ids = token_ids
+        self._subscription_count = len(token_ids)
+
+    def set_markets(self, markets: list[Btc15mMarket]) -> None:
+        token_ids: list[str] = []
+        slugs: list[str] = []
+        latest_window: int | None = None
+        latest_slug: str | None = None
+
+        for market in sorted(markets, key=lambda item: item.window_timestamp):
+            slugs.append(market.slug)
+            for token_id in market.token_ids:
+                if token_id not in token_ids:
+                    token_ids.append(token_id)
+            latest_window = market.window_timestamp
+            latest_slug = market.slug
+
+        self._active_slugs = slugs
+        self._active_slug = latest_slug
+        self._active_window_timestamp = latest_window
+        self._token_ids = tuple(token_ids)
         self._subscription_count = len(token_ids)
 
     def note_message(self) -> None:
@@ -74,6 +108,7 @@ class PolymarketAdapter(CollectorAdapter):
                 "service": self._service_name,
                 "exchange": self.exchange,
                 "active_slug": self._active_slug,
+                "active_slugs": self._active_slugs,
                 "active_window_timestamp": self._active_window_timestamp,
                 "token_ids": list(self._token_ids),
             },

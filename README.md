@@ -8,30 +8,30 @@ Nothing else.
 
 ---
 
-A self-hosted, **BTC-only** research system: live market data ingestion (Binance perp + Polymarket BTC 15m), Parquet normalization, derived cross-venue metrics, knowledge scores, and a local analyst agent — with Prometheus metrics, DuckDB catalog, and Grafana OSS monitoring.
-
-Built for operators who want a reproducible single-node pipeline without proprietary SaaS lock-in.
+A self-hosted, **BTC-only** collector pipeline: live market data → raw JSONL → immutable normalized parquet batches — with Prometheus metrics and Grafana OSS monitoring.
 
 ---
 
-## Five layers
+## Pipeline
 
 ```
-Layer 1  RAW           → append-only JSONL under raw/
-Layer 2  NORMALIZED   → immutable parquet batches under data/ (1 JSONL → 1 parquet)
-Layer 3  DERIVED      → implied prob, PM–perp divergence, liquidity
-Layer 4  KNOWLEDGE    → momentum, positioning, fear, conviction scores
-Layer 5  AGENTS       → on-demand CLI briefing (catalog + derived + knowledge)
+Collector (:9100–9103)
+    ↓
+raw/          JSONL batches (kept permanently)
+    ↓
+Normalizer (:9101)   DuckDB writer
+    ↓
+data/         immutable parquet batches (1 JSONL → 1 parquet)
 ```
 
 ```
 Binance WS ──┐
-             ├──► raw/ ──► data/ (immutable parquet batches)
+             ├──► raw/ ──► data/
 Polymarket ──┘              ↓
                     Prometheus :9100–9103, :9101  →  Grafana :3001
 ```
 
-Derived, knowledge, catalog, and agent layers exist in the repo but are **out of scope** for the normalizer process.
+Optional future tiers (derived, catalog, agent) live under `archive/tier2/` — not part of the running pipeline.
 
 ---
 
@@ -44,7 +44,6 @@ Derived, knowledge, catalog, and agent layers exist in the repo but are **out of
 | **Polymarket collector** (`:9103`) | BTC 15m Up/Down — direct CLOB WebSocket |
 | **Normalizer** (`:9101`) | raw JSONL → immutable parquet batches (DuckDB writer) |
 | **Monitoring** | 6 Grafana dashboards, Prometheus alerts |
-| **Agent** | `run_agent.py brief` / `ask` — local, no LLM |
 
 **Symbols:** `BTCUSDT` (Binance), `BTC_15M` (Polymarket)
 
@@ -108,14 +107,6 @@ docker compose up -d
 
 Open folder **PargaliIbrahim Canvas**. Key dashboards: **Overview**, **Normalizer Health**, **Collector Health**.
 
-### 4. Ask the agent
-
-```bash
-PYTHONPATH=src ./venv/bin/python src/run_agent.py brief
-PYTHONPATH=src ./venv/bin/python src/run_agent.py ask "pm ne diyor"
-PYTHONPATH=src ./venv/bin/python src/run_agent.py ask "divergence"
-```
-
 ---
 
 ## Command reference
@@ -149,15 +140,11 @@ cd "/path/to/Pargali-Ibrahim-Library"
 │   ├── normalize_parquet.py                       # Normalizer CLI (:9101)
 │   ├── normalizer/                                # DuckDB batch writer
 │   ├── convert_parquet.py                         # Deprecated → normalize_parquet
-│   ├── derive_polymarket.py / derive_cross_market.py
-│   ├── knowledge/btc_suite.py
-│   ├── agents/btc_analyst.py / run_agent.py
-│   ├── datasets.py                                # Source registry
 │   ├── collectors/                                # Adapter layer
-│   ├── metrics/ / catalog/
+│   ├── metrics/                                   # Prometheus registries
+│   ├── archive/tier2/                             # derived, catalog, agent (not run)
 ├── raw/                     # JSONL (gitignored)
 ├── data/                    # Parquet (gitignored)
-├── catalog/catalog.duckdb   # Runtime catalog (gitignored)
 ├── monitoring/              # Docker Compose stack
 ├── infra/monitoring/grafana/dashboards/  # Dashboard JSON source of truth
 ├── README.md
@@ -189,48 +176,21 @@ cd "/path/to/Pargali-Ibrahim-Library"
 | `prediction_price` | best_bid_ask, price_change |
 | `prediction_orderbook` | book snapshots |
 | `prediction_trades` | last_trade_price |
-| `prediction_derived` | implied prob, divergence, liquidity (computed) |
 
-**Knowledge (`knowledge`, symbol `BTC_SUITE`):**
-
-| Category | Content |
-|----------|---------|
-| `btc_signals` | momentum, positioning, fear, conviction |
-
-**Dataset ID (catalog):** `{category}:{exchange}:{symbol}` — e.g. `trades:binance_futures:BTCUSDT`
+**Dataset ID:** `{category}:{exchange}:{symbol}` — e.g. `trades:binance_futures:BTCUSDT`
 
 ---
 
 ## DuckDB queries
 
 ```bash
-# Trade counts
+# Trade counts (batch glob)
 ./venv/bin/python -c "
 import duckdb
 print(duckdb.connect().execute('''
   SELECT symbol, COUNT(*) AS n
   FROM read_parquet('data/trades/binance_futures/BTCUSDT/*/*.parquet')
   GROUP BY 1
-''').df())
-"
-
-# Latest PM derived (Up)
-./venv/bin/python -c "
-import duckdb
-print(duckdb.connect().execute('''
-  SELECT timestamp, implied_prob, pm_perp_divergence, btc_return_bps
-  FROM read_parquet('data/prediction_derived/polymarket/BTC_15M/*.parquet')
-  WHERE outcome = 'Up'
-  ORDER BY timestamp DESC LIMIT 5
-''').df())
-"
-
-# Knowledge scores
-./venv/bin/python -c "
-import duckdb
-print(duckdb.connect().execute('''
-  SELECT * FROM read_parquet('data/btc_signals/knowledge/BTC_SUITE/*.parquet')
-  ORDER BY timestamp DESC LIMIT 3
 ''').df())
 "
 ```
@@ -257,7 +217,6 @@ Contact points are stubs — configure SMTP or webhook before expecting notifica
 
 | File | Purpose |
 |------|---------|
-| `catalog/config.yaml` | DuckDB path, data roots |
 | `monitoring/.env` | Grafana credentials |
 | `monitoring/alerts/config.yaml` | Alert thresholds (reference) |
 | `src/datasets.py` | Exchange/category registry |

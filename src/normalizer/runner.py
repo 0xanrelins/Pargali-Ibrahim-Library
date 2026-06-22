@@ -6,7 +6,7 @@ import logging
 import time
 from pathlib import Path
 
-from datasets import REGISTERED_SOURCES, all_categories, iter_jsonl_paths, raw_root
+from datasets import POLYMARKET, REGISTERED_SOURCES, all_categories, iter_jsonl_paths, raw_root
 from metrics.pipeline_registry import (
     parquet_failed_conversions_total,
     parquet_files_processed_total,
@@ -17,7 +17,12 @@ from metrics.pipeline_registry import (
 )
 from normalizer.batch import normalize_jsonl_batch
 from normalizer.paths import batch_parquet_path_from_jsonl, project_paths, relative_to_project
-from normalizer.state import load_processed_files, save_processed_files
+from normalizer.state import load_processed_files, save_polymarket_tokens, save_processed_files
+from normalizer.tokens import (
+    invalidate_polymarket_outcome_batches,
+    mark_polymarket_outcome_backfill_done,
+    prepare_polymarket_token_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +53,21 @@ def collect_backlog_metrics(
 
 def normalize_once() -> dict[str, int]:
     batch_started = time.monotonic()
-    project_root, data_root, state_path, _tokens_path = project_paths()
+    project_root, data_root, state_path, tokens_path = project_paths()
     processed_files = load_processed_files(state_path)
+
+    token_registry, backfill_outcomes = prepare_polymarket_token_registry(
+        project_root=project_root,
+        tokens_path=tokens_path,
+    )
+    if backfill_outcomes:
+        invalidate_polymarket_outcome_batches(
+            project_root=project_root,
+            data_root=data_root,
+            state_path=state_path,
+            processed_files=processed_files,
+        )
+        mark_polymarket_outcome_backfill_done(tokens_path)
 
     stats = {
         "raw_files_seen": 0,
@@ -93,11 +111,25 @@ def normalize_once() -> dict[str, int]:
                     continue
 
                 try:
+                    mapping_before = (
+                        token_registry.to_mapping()
+                        if source.exchange == POLYMARKET
+                        else None
+                    )
                     written_path, row_count = normalize_jsonl_batch(
                         jsonl_path,
                         project_root=project_root,
                         data_root=data_root,
+                        token_registry=(
+                            token_registry if source.exchange == POLYMARKET else None
+                        ),
                     )
+                    if (
+                        source.exchange == POLYMARKET
+                        and category == "prediction_metadata"
+                        and token_registry.to_mapping() != mapping_before
+                    ):
+                        save_polymarket_tokens(tokens_path, token_registry.to_mapping())
                 except Exception:
                     stats["raw_files_failed"] += 1
                     parquet_failed_conversions_total.labels(reason="normalize").inc()

@@ -15,7 +15,7 @@ scrape_configs:
           service: market-data-platform-collector
       - targets: ["host.docker.internal:9101"]
         labels:
-          service: market-data-platform-converter
+          service: market-data-platform-normalizer
       - targets: ["host.docker.internal:9102"]
         labels:
           service: market-data-platform-orderbook

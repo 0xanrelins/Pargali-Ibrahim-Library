@@ -10,7 +10,6 @@ import signal
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,12 +30,27 @@ from metrics.polymarket_registry import (
     polymarket_messages_total,
     polymarket_reconnect_total,
 )
-from polymarket.discovery import Btc15mMarket, current_window_timestamp, fetch_btc_15m_market
+from polymarket.discovery import (
+    Btc15mMarket,
+    fetch_btc_15m_market,
+    is_btc_15m_metadata,
+    is_btc_15m_slug,
+)
+from polymarket.lifecycle import (
+    LIFECYCLE_TICK_SECONDS,
+    MarketLifecycleState,
+    TrackedMarket,
+    candidate_window_timestamps,
+    collect_token_ids,
+    find_tracked_by_slug,
+    find_tracked_by_token,
+    pending_subscription_markets,
+    prune_resolved_or_expired,
+)
 
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 FLUSH_INTERVAL_SEC = 60
 REPORT_INTERVAL_SEC = 10
-MARKET_POLL_INTERVAL_SEC = 30
 METRICS_INTERVAL_SEC = 5
 PING_INTERVAL_SEC = 10
 STALL_WARN_SECONDS = 30
@@ -109,23 +123,18 @@ class RawFlushBuffer:
         return written
 
 
-@dataclass
-class SubscriptionState:
-    market: Btc15mMarket | None = None
-
-
 class PolymarketWsClient:
     def __init__(
         self,
         *,
         adapter: PolymarketAdapter,
         outbound: queue.Queue[str],
-        subscription_state: SubscriptionState,
+        lifecycle: MarketLifecycleState,
         state_lock: threading.Lock,
     ) -> None:
         self._adapter = adapter
         self._outbound = outbound
-        self._subscription_state = subscription_state
+        self._lifecycle = lifecycle
         self._state_lock = state_lock
         self._ws_app: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
@@ -187,25 +196,24 @@ class PolymarketWsClient:
 
     def _send_subscription(self, ws: websocket.WebSocketApp) -> None:
         with self._state_lock:
-            market = self._subscription_state.market
-        if market is None:
+            token_ids = collect_token_ids(self._lifecycle)
+            markets = [tracked.market for tracked in self._lifecycle.tracked.values()]
+
+        if not token_ids:
             return
 
         payload = {
-            "assets_ids": list(market.token_ids),
+            "assets_ids": list(token_ids),
             "type": "market",
             "custom_feature_enabled": True,
         }
         ws.send(json.dumps(payload))
-        self._adapter.set_market(
-            slug=market.slug,
-            window_timestamp=market.window_timestamp,
-            token_ids=market.token_ids,
-        )
+        self._adapter.set_markets(markets)
         logger.info(
-            "Subscribed to Polymarket market slug=%s tokens=%s",
-            market.slug,
-            market.token_ids,
+            "Subscribed to %s Polymarket market(s) tokens=%s slugs=%s",
+            len(markets),
+            token_ids,
+            [market.slug for market in markets],
         )
 
     def _ping_loop(self, ws: websocket.WebSocketApp) -> None:
@@ -267,41 +275,127 @@ def market_subscription_record(market: Btc15mMarket) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-def ensure_market(
+def _enrich_ws_resolved_payload(
+    payload: dict[str, Any],
+    tracked: TrackedMarket,
+) -> dict[str, Any]:
+    enriched = dict(payload)
+    if not str(enriched.get("slug", "")):
+        enriched["slug"] = tracked.market.slug
+    if not str(enriched.get("condition_id", "")):
+        enriched["condition_id"] = tracked.market.condition_id
+    if not str(enriched.get("question", "")):
+        enriched["question"] = tracked.market.question
+    if not str(enriched.get("yes_token_id", "")):
+        enriched["yes_token_id"] = tracked.market.yes_token_id
+    if not str(enriched.get("no_token_id", "")):
+        enriched["no_token_id"] = tracked.market.no_token_id
+    if not str(enriched.get("resolved_source", "")):
+        enriched["resolved_source"] = "ws"
+    return enriched
+
+
+def _tracked_market_for_resolved(
+    lifecycle: MarketLifecycleState,
+    payload: dict[str, Any],
+) -> TrackedMarket | None:
+    slug = str(payload.get("slug", ""))
+    if is_btc_15m_slug(slug):
+        tracked = find_tracked_by_slug(lifecycle, slug)
+        if tracked is not None:
+            return tracked
+    winning_asset_id = str(payload.get("winning_asset_id", ""))
+    return find_tracked_by_token(lifecycle, winning_asset_id)
+
+
+def _should_store_metadata(payload: dict[str, Any], lifecycle: MarketLifecycleState) -> bool:
+    event_type = str(payload.get("event_type", payload.get("type", "")))
+    if event_type == "market_resolved" and _tracked_market_for_resolved(lifecycle, payload) is not None:
+        return True
+    return is_btc_15m_metadata(payload)
+
+
+def sync_market_lifecycle(
     *,
-    subscription_state: SubscriptionState,
-    state_lock: threading.Lock,
+    lifecycle: MarketLifecycleState,
     ws_client: PolymarketWsClient,
-) -> bool:
-    target_window = current_window_timestamp()
-    with state_lock:
-        current = subscription_state.market
-        if current is not None and current.window_timestamp == target_window:
-            return False
+    writer: RawFlushBuffer,
+    counts: dict[str, int],
+) -> None:
+    now = time.time()
+    previous_tokens = collect_token_ids(lifecycle)
 
-    market = fetch_btc_15m_market(window_timestamp=target_window)
-    if market is None:
-        market = fetch_btc_15m_market(window_timestamp=target_window, look_ahead_windows=1)
-    if market is None:
-        return False
+    for window_ts in candidate_window_timestamps(now):
+        if window_ts in lifecycle.tracked:
+            continue
+        if window_ts in lifecycle.finished_windows:
+            continue
+        market = fetch_btc_15m_market(window_timestamp=window_ts)
+        if market is None:
+            logger.warning("No BTC 15m market available for window=%s", window_ts)
+            continue
+        lifecycle.tracked[window_ts] = TrackedMarket(market=market)
+        logger.info("Tracking market slug=%s window=%s", market.slug, window_ts)
 
-    with state_lock:
-        previous = subscription_state.market
-        subscription_state.market = market
+    removed = prune_resolved_or_expired(lifecycle, now=now)
+    for market in removed:
+        logger.info("Stopped tracking market slug=%s", market.slug)
 
-    if previous is not None:
-        polymarket_market_rotations_total.inc()
-        logger.info("Rotating Polymarket market %s -> %s", previous.slug, market.slug)
+    for market in pending_subscription_markets(lifecycle):
+        line = market_subscription_record(market)
+        writer.append("prediction_metadata", line)
+        counts["prediction_metadata"] += 1
 
-    ws_client.reconnect()
-    return True
+    current_tokens = collect_token_ids(lifecycle)
+    if current_tokens != previous_tokens:
+        if removed:
+            polymarket_market_rotations_total.inc(len(removed))
+        ws_client.reconnect()
+
+
+def handle_ws_payload(
+    payload: dict[str, Any],
+    *,
+    lifecycle: MarketLifecycleState,
+    state_lock: threading.Lock,
+    writer: RawFlushBuffer,
+    counts: dict[str, int],
+    ws_client: PolymarketWsClient,
+) -> None:
+    event_type = str(payload.get("event_type", payload.get("type", "")))
+    stored_payload = payload
+
+    if event_type == "market_resolved":
+        tracked = _tracked_market_for_resolved(lifecycle, payload)
+        if tracked is not None:
+            stored_payload = _enrich_ws_resolved_payload(payload, tracked)
+            tracked.resolved = True
+            lifecycle.finished_windows.add(tracked.market.window_timestamp)
+            logger.info("WS market_resolved slug=%s", tracked.market.slug)
+            sync_market_lifecycle(
+                lifecycle=lifecycle,
+                ws_client=ws_client,
+                writer=writer,
+                counts=counts,
+            )
+
+    category = classify_category(event_type)
+    if category is None:
+        counts["other"] += 1
+        return
+    if category == "prediction_metadata" and not _should_store_metadata(stored_payload, lifecycle):
+        counts["other"] += 1
+        return
+
+    writer.append(category, json.dumps(stored_payload, separators=(",", ":")))
+    counts[category] += 1
 
 
 def run_collector_loop(
     *,
     adapter: PolymarketAdapter,
     ws_client: PolymarketWsClient,
-    subscription_state: SubscriptionState,
+    lifecycle: MarketLifecycleState,
     state_lock: threading.Lock,
     inbound: queue.Queue[str],
 ) -> dict[str, int]:
@@ -310,37 +404,29 @@ def run_collector_loop(
     writer = RawFlushBuffer(RAW_ROOT)
 
     last_report = time.monotonic()
-    last_market_poll = 0.0
+    last_lifecycle = 0.0
     last_metrics = 0.0
-    pending_subscription_record: Btc15mMarket | None = None
 
-    ensure_market(
-        subscription_state=subscription_state,
-        state_lock=state_lock,
-        ws_client=ws_client,
-    )
     with state_lock:
-        pending_subscription_record = subscription_state.market
+        sync_market_lifecycle(
+            lifecycle=lifecycle,
+            ws_client=ws_client,
+            writer=writer,
+            counts=counts,
+        )
 
     while not stop_requested:
         now = time.monotonic()
 
-        if now - last_market_poll >= MARKET_POLL_INTERVAL_SEC:
-            rotated = ensure_market(
-                subscription_state=subscription_state,
-                state_lock=state_lock,
-                ws_client=ws_client,
-            )
-            if rotated:
-                with state_lock:
-                    pending_subscription_record = subscription_state.market
-            last_market_poll = now
-
-        if pending_subscription_record is not None:
-            line = market_subscription_record(pending_subscription_record)
-            writer.append("prediction_metadata", line)
-            counts["prediction_metadata"] += 1
-            pending_subscription_record = None
+        if now - last_lifecycle >= LIFECYCLE_TICK_SECONDS:
+            with state_lock:
+                sync_market_lifecycle(
+                    lifecycle=lifecycle,
+                    ws_client=ws_client,
+                    writer=writer,
+                    counts=counts,
+                )
+            last_lifecycle = now
 
         try:
             message = inbound.get(timeout=0.2)
@@ -354,20 +440,24 @@ def run_collector_loop(
                 counts["other"] += 1
                 continue
 
-            event_type = str(payload.get("event_type", payload.get("type", "")))
-            category = classify_category(event_type)
-            if category is None:
-                counts["other"] += 1
-            else:
-                writer.append(category, message)
-                counts[category] += 1
+            with state_lock:
+                handle_ws_payload(
+                    payload,
+                    lifecycle=lifecycle,
+                    state_lock=state_lock,
+                    writer=writer,
+                    counts=counts,
+                    ws_client=ws_client,
+                )
 
         if writer.should_flush():
             for category, path, line_count in writer.flush():
                 logger.info("Flushed %s lines to %s (%s)", line_count, path, category)
 
         if now - last_report >= REPORT_INTERVAL_SEC:
-            logger.info("Polymarket messages — %s", counts)
+            with state_lock:
+                active_slugs = [tracked.market.slug for tracked in lifecycle.tracked.values()]
+            logger.info("Polymarket messages — %s | active=%s", counts, active_slugs)
             status = adapter.get_status()
             if (
                 status.last_message_timestamp is not None
@@ -405,13 +495,13 @@ def main() -> int:
     logger.info("Flush interval: %s seconds", FLUSH_INTERVAL_SEC)
 
     adapter = PolymarketAdapter(service_name="market-data-platform-polymarket")
-    subscription_state = SubscriptionState()
+    lifecycle = MarketLifecycleState()
     state_lock = threading.Lock()
     outbound: queue.Queue[str] = queue.Queue()
     ws_client = PolymarketWsClient(
         adapter=adapter,
         outbound=outbound,
-        subscription_state=subscription_state,
+        lifecycle=lifecycle,
         state_lock=state_lock,
     )
 
@@ -420,7 +510,7 @@ def main() -> int:
         run_collector_loop(
             adapter=adapter,
             ws_client=ws_client,
-            subscription_state=subscription_state,
+            lifecycle=lifecycle,
             state_lock=state_lock,
             inbound=outbound,
         )

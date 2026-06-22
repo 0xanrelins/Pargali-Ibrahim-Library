@@ -12,12 +12,12 @@ import threading
 from collect_polymarket import (
     FLUSH_INTERVAL_SEC,
     RAW_ROOT,
-    SubscriptionState,
     PolymarketWsClient,
     request_stop,
     run_collector_loop,
     stop_requested,
 )
+from polymarket.lifecycle import MarketLifecycleState
 from collectors.polymarket import PolymarketAdapter
 from metrics.exporter import (
     DEFAULT_POLYMARKET_METRICS_PORT,
@@ -51,13 +51,13 @@ def main() -> int:
     start_exporter(port=DEFAULT_POLYMARKET_METRICS_PORT)
 
     adapter = PolymarketAdapter(service_name="market-data-platform-polymarket")
-    subscription_state = SubscriptionState()
+    lifecycle = MarketLifecycleState()
     state_lock = threading.Lock()
     outbound: queue.Queue[str] = queue.Queue()
     ws_client = PolymarketWsClient(
         adapter=adapter,
         outbound=outbound,
-        subscription_state=subscription_state,
+        lifecycle=lifecycle,
         state_lock=state_lock,
     )
 
@@ -66,7 +66,7 @@ def main() -> int:
         run_collector_loop(
             adapter=adapter,
             ws_client=ws_client,
-            subscription_state=subscription_state,
+            lifecycle=lifecycle,
             state_lock=state_lock,
             inbound=outbound,
         )

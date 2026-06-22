@@ -1,6 +1,7 @@
 services:
   grafana:
-    image: grafana/grafana:11.5.2
+    # Ubuntu-based image required for motherduck-duckdb-datasource (glibc; Alpine/musl fails).
+    image: grafana/grafana:11.5.2-ubuntu
     container_name: mdp-grafana
     ports:
       - "3001:3000"
@@ -8,10 +9,14 @@ services:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
       GF_USERS_DEFAULT_THEME: dark
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: motherduck-duckdb-datasource
+      GF_INSTALL_PLUGINS: grafana-clock-panel
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/plugins/motherduck-duckdb-datasource:/var/lib/grafana/plugins/motherduck-duckdb-datasource:ro
       - ../infra/monitoring/grafana/dashboards:/etc/grafana/dashboards/market-data:ro
+      - ../data:/data:ro
     depends_on:
       - prometheus
       - loki

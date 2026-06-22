@@ -14,6 +14,7 @@ from datasets import (
     PolymarketCategory,
     iter_jsonl_paths as dataset_iter_jsonl_paths,
 )
+from polymarket.discovery import is_btc_15m_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,12 @@ class OutcomeTokenRegistry:
             return "Unknown"
         return self._by_asset.get(asset_id, "Unknown")
 
+    def to_mapping(self) -> dict[str, str]:
+        return dict(self._by_asset)
+
+    def merge_from_mapping(self, mapping: dict[str, str]) -> None:
+        self._by_asset.update(mapping)
+
 
 def _resolve_outcome(
     asset_id: str,
@@ -85,18 +92,27 @@ def _resolve_outcome(
 
 
 def parse_metadata_row(payload: dict[str, object]) -> ParsedRow:
-    return {
+    event_type = str(payload.get("event_type", payload.get("type", "unknown")))
+    row: ParsedRow = {
         "timestamp": _parse_timestamp_ms(payload),
         "symbol": SYMBOL,
-        "event_type": str(payload.get("event_type", payload.get("type", "unknown"))),
+        "event_type": event_type,
         "slug": str(payload.get("slug", "")),
         "condition_id": str(payload.get("condition_id", payload.get("market", ""))),
         "question": str(payload.get("question", "")),
         "end_date": str(payload.get("end_date", "")),
         "yes_token_id": str(payload.get("yes_token_id", "")),
         "no_token_id": str(payload.get("no_token_id", "")),
+        "winning_outcome": "",
+        "winning_asset_id": "",
+        "resolved_source": "",
         "exchange": EXCHANGE,
     }
+    if event_type == "market_resolved":
+        row["winning_outcome"] = str(payload.get("winning_outcome", ""))
+        row["winning_asset_id"] = str(payload.get("winning_asset_id", ""))
+        row["resolved_source"] = str(payload.get("resolved_source", "ws"))
+    return row
 
 
 def parse_price_row(
@@ -256,6 +272,8 @@ def parse_polymarket_lines(
         return []
 
     if category == "prediction_metadata":
+        if not is_btc_15m_metadata(payload):
+            return []
         row = parse_metadata_row(payload)
         if token_registry is not None:
             token_registry.update_from_metadata(row)

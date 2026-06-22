@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 WINDOW_SECONDS = 900
 SLUG_PREFIX = "btc-updown-15m"
+BTC_15M_SLUG_PREFIX = f"{SLUG_PREFIX}-"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,21 @@ class Btc15mMarket:
     @property
     def token_ids(self) -> tuple[str, str]:
         return self.yes_token_id, self.no_token_id
+
+
+def is_btc_15m_slug(slug: str) -> bool:
+    return slug.startswith(BTC_15M_SLUG_PREFIX)
+
+
+def is_btc_15m_metadata(payload: dict[str, object]) -> bool:
+    """Return True for our BTC 15m metadata rows (drops global WS new_market noise)."""
+    event_type = str(payload.get("event_type", payload.get("type", "")))
+    if event_type == "market_subscription":
+        slug = str(payload.get("slug", ""))
+        return not slug or is_btc_15m_slug(slug)
+    if event_type not in {"new_market", "market_resolved"}:
+        return False
+    return is_btc_15m_slug(str(payload.get("slug", "")))
 
 
 def current_window_timestamp(now: float | None = None) -> int:
@@ -56,9 +72,11 @@ def _parse_token_ids(raw: object) -> tuple[str, str]:
     return str(token_ids[0]), str(token_ids[1])
 
 
-def _fetch_market_by_slug(slug: str) -> Btc15mMarket | None:
-    query = urllib.parse.urlencode({"slug": slug})
-    url = f"{GAMMA_API_BASE}/markets?{query}"
+def _fetch_market_payload_by_slug(slug: str, *, closed: bool | None = None) -> dict | None:
+    query: dict[str, str] = {"slug": slug}
+    if closed is not None:
+        query["closed"] = "true" if closed else "false"
+    url = f"{GAMMA_API_BASE}/markets?{urllib.parse.urlencode(query)}"
     request = urllib.request.Request(url, headers={"User-Agent": "btc-intelligence-platform/1.0"})
 
     try:
@@ -74,10 +92,10 @@ def _fetch_market_by_slug(slug: str) -> Btc15mMarket | None:
     market = payload[0]
     if not isinstance(market, dict):
         return None
+    return market
 
-    if market.get("closed") or not market.get("active", True):
-        return None
 
+def _market_from_payload(slug: str, market: dict) -> Btc15mMarket | None:
     try:
         yes_token_id, no_token_id = _parse_token_ids(market.get("clobTokenIds"))
     except ValueError as exc:
@@ -94,6 +112,83 @@ def _fetch_market_by_slug(slug: str) -> Btc15mMarket | None:
         yes_token_id=yes_token_id,
         no_token_id=no_token_id,
     )
+
+
+def _fetch_market_by_slug(slug: str) -> Btc15mMarket | None:
+    market = _fetch_market_payload_by_slug(slug)
+    if market is None:
+        market = _fetch_market_payload_by_slug(slug, closed=True)
+    if market is None:
+        return None
+
+    if market.get("closed") or not market.get("active", True):
+        return None
+
+    return _market_from_payload(slug, market)
+
+
+def fetch_btc_15m_resolution_from_gamma(slug: str) -> dict[str, str] | None:
+    """Return winning outcome for a resolved BTC 15m market via Gamma API."""
+    if not is_btc_15m_slug(slug):
+        return None
+
+    market = _fetch_market_payload_by_slug(slug)
+    if market is None:
+        market = _fetch_market_payload_by_slug(slug, closed=True)
+    if market is None:
+        return None
+
+    if str(market.get("umaResolutionStatus", "")) != "resolved":
+        return None
+
+    try:
+        yes_token_id, no_token_id = _parse_token_ids(market.get("clobTokenIds"))
+    except ValueError:
+        return None
+
+    if isinstance(market.get("outcomes"), str):
+        outcomes = json.loads(market["outcomes"])
+    elif isinstance(market.get("outcomes"), list):
+        outcomes = market["outcomes"]
+    else:
+        return None
+
+    if isinstance(market.get("outcomePrices"), str):
+        outcome_prices = json.loads(market["outcomePrices"])
+    elif isinstance(market.get("outcomePrices"), list):
+        outcome_prices = market["outcomePrices"]
+    else:
+        return None
+
+    winning_outcome = ""
+    winning_asset_id = ""
+    for outcome, raw_price in zip(outcomes, outcome_prices, strict=False):
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+        if price < 0.99:
+            continue
+        winning_outcome = str(outcome)
+        if winning_outcome.lower() in {"up", "yes"}:
+            winning_asset_id = yes_token_id
+        elif winning_outcome.lower() in {"down", "no"}:
+            winning_asset_id = no_token_id
+        break
+
+    if not winning_outcome:
+        return None
+
+    return {
+        "slug": slug,
+        "condition_id": str(market.get("conditionId", "")),
+        "question": str(market.get("question", "")),
+        "winning_outcome": winning_outcome,
+        "winning_asset_id": winning_asset_id,
+        "yes_token_id": yes_token_id,
+        "no_token_id": no_token_id,
+        "end_date": str(market.get("endDate", "")),
+    }
 
 
 def fetch_btc_15m_market(

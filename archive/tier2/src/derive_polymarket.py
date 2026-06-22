@@ -286,7 +286,9 @@ def _write_derived_day(derived: pd.DataFrame, out_path: Path) -> int:
             "pm_perp_divergence": "Float64",
         }
     )
-    frame.to_parquet(out_path, index=False)
+    tmp_path = out_path.with_suffix(f"{out_path.suffix}.tmp")
+    frame.to_parquet(tmp_path, index=False)
+    tmp_path.replace(out_path)
     return len(frame)
 
 
@@ -334,6 +336,29 @@ def _publish_latest_metrics(derived: pd.DataFrame) -> None:
         cross_pm_perp_divergence.set(float(divergence))
 
 
+def _derive_input_paths(data_root: Path, day: str) -> tuple[Path, ...]:
+    symbol = POLYMARKET_SYMBOL
+    return (
+        symbol_parquet_root(data_root, POLYMARKET, "prediction_price", symbol) / f"{day}.parquet",
+        symbol_parquet_root(data_root, POLYMARKET, "prediction_metadata", symbol) / f"{day}.parquet",
+        symbol_parquet_root(data_root, POLYMARKET, "prediction_orderbook", symbol) / f"{day}.parquet",
+    )
+
+
+def _should_rederive_day(data_root: Path, day: str) -> bool:
+    """Skip closed days unless upstream parquet changed (avoids rewriting 200MB+ files)."""
+    price_path = _derive_input_paths(data_root, day)[0]
+    if not price_path.exists():
+        return False
+
+    out_path = symbol_parquet_root(data_root, POLYMARKET, "prediction_derived", POLYMARKET_SYMBOL) / f"{day}.parquet"
+    if not out_path.exists():
+        return True
+
+    out_mtime = out_path.stat().st_mtime
+    return any(p.exists() and p.stat().st_mtime > out_mtime for p in _derive_input_paths(data_root, day))
+
+
 def derive_polymarket_day(data_root: Path, day: str) -> int:
     symbol = POLYMARKET_SYMBOL
     price_path = symbol_parquet_root(data_root, POLYMARKET, "prediction_price", symbol) / f"{day}.parquet"
@@ -373,6 +398,8 @@ def derive_polymarket_once(data_root: Path) -> dict[str, int]:
     stats = {"days_processed": 0, "rows_written": 0}
     for price_path in sorted(price_root.glob("*.parquet")):
         day = price_path.stem
+        if not _should_rederive_day(data_root, day):
+            continue
         rows = derive_polymarket_day(data_root, day)
         if rows:
             stats["days_processed"] += 1
