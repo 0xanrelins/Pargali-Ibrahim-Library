@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import DefaultDict
 
-from datasets import POLYMARKET, REGISTERED_SOURCES, all_categories, iter_jsonl_paths, raw_root
+from datasets import REGISTERED_SOURCES, all_categories, iter_jsonl_paths, raw_root
 from metrics.pipeline_registry import (
     raw_retention_backlog_blocked_files,
     raw_retention_bytes_freed_total,
@@ -31,7 +31,6 @@ DEFAULT_GRACE_HOURS = 24.0
 
 SKIP_REASON_NO_PARQUET = "no_parquet"
 SKIP_REASON_GRACE = "grace"
-SKIP_REASON_POLYMARKET = "polymarket_excluded"
 SKIP_REASON_BACKLOG = "backlog"
 
 SkipKey = tuple[str, str, str]
@@ -54,7 +53,6 @@ class RawRetentionStats:
     bytes_freed: int = 0
     skipped_no_parquet: int = 0
     skipped_grace: int = 0
-    skipped_polymarket: int = 0
     errors: int = 0
     backlog_by_category: dict[str, int] = field(default_factory=dict)
     skip_by_source: DefaultDict[SkipKey, int] = field(default_factory=lambda: defaultdict(int))
@@ -68,7 +66,6 @@ class RawRetentionStats:
             "bytes_freed": self.bytes_freed,
             "skipped_no_parquet": self.skipped_no_parquet,
             "skipped_grace": self.skipped_grace,
-            "skipped_polymarket": self.skipped_polymarket,
             "errors": self.errors,
         }
 
@@ -90,7 +87,6 @@ def _iter_retention_skip_label_sets() -> list[SkipKey]:
         for category in source.categories:
             labels.append((SKIP_REASON_NO_PARQUET, source.exchange, category))
             labels.append((SKIP_REASON_GRACE, source.exchange, category))
-            labels.append((SKIP_REASON_POLYMARKET, source.exchange, category))
     return labels
 
 
@@ -148,8 +144,6 @@ def _record_skip(
         stats.skipped_no_parquet += 1
     elif reason == SKIP_REASON_GRACE:
         stats.skipped_grace += 1
-    elif reason == SKIP_REASON_POLYMARKET:
-        stats.skipped_polymarket += 1
 
 
 def _log_skip_summary(stats: RawRetentionStats) -> None:
@@ -197,20 +191,6 @@ def run_raw_retention(
             continue
 
         exchange_raw_root = raw_root(project_root, source.exchange)
-        if source.exchange == POLYMARKET:
-            for category in source.categories:
-                pm_count = len(iter_jsonl_paths(exchange_raw_root, category))
-                stats.skipped_polymarket += pm_count
-                if pm_count:
-                    stats.skip_by_source[(SKIP_REASON_POLYMARKET, source.exchange, category)] = pm_count
-                    logger.info(
-                        "Raw retention skipped Polymarket raw — exchange=%s category=%s files=%s",
-                        source.exchange,
-                        category,
-                        pm_count,
-                    )
-            continue
-
         for category in source.categories:
             for jsonl_path in iter_jsonl_paths(exchange_raw_root, category):
                 parquet_path = batch_parquet_path_from_jsonl(
@@ -313,7 +293,7 @@ class RawRetentionPoller:
         )
         self._thread.start()
         logger.info(
-            "Raw retention poller started (interval=%ss, grace=%sh, dry_run=%s, polymarket=excluded)",
+            "Raw retention poller started (interval=%ss, grace=%sh, dry_run=%s)",
             self.config.interval_sec,
             self.config.grace_hours,
             self.config.dry_run,
@@ -340,12 +320,11 @@ class RawRetentionPoller:
                 elif self.config.dry_run:
                     logger.info(
                         "Raw retention dry-run complete — would_delete: %s, bytes: %s, "
-                        "skipped_no_parquet: %s, skipped_grace: %s, skipped_polymarket: %s",
+                        "skipped_no_parquet: %s, skipped_grace: %s",
                         stats["would_delete"],
                         stats["bytes_would_free"],
                         stats["skipped_no_parquet"],
                         stats["skipped_grace"],
-                        stats["skipped_polymarket"],
                     )
                 else:
                     logger.info(

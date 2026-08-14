@@ -195,7 +195,7 @@ class RawRetentionTests(unittest.TestCase):
         self.assertEqual(stats["run_skipped_backlog"], 1)
         self.assertEqual(stats["deleted"], 0)
 
-    def test_polymarket_excluded_by_default(self) -> None:
+    def test_polymarket_live_delete_with_parquet_and_grace(self) -> None:
         jsonl, parquet = _polymarket_metadata_paths(self.root)
         _write_jsonl(jsonl, age_hours=48.0)
         _write_parquet(parquet)
@@ -213,9 +213,99 @@ class RawRetentionTests(unittest.TestCase):
             dry_run=False,
         )
 
+        self.assertFalse(jsonl.exists())
+        self.assertEqual(stats["deleted"], 1)
+
+    def test_polymarket_counted_in_dry_run_candidates(self) -> None:
+        jsonl, parquet = _polymarket_metadata_paths(self.root)
+        _write_jsonl(jsonl, age_hours=48.0)
+        _write_parquet(parquet)
+        self.state_path.write_text(
+            json.dumps(
+                {"processed_files": [f"raw/{POLYMARKET}/prediction_metadata/2026-08-14/12-00-00.jsonl"]}
+            ),
+            encoding="utf-8",
+        )
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=True,
+        )
+
+        self.assertTrue(jsonl.exists())
+        self.assertEqual(stats["would_delete"], 1)
+        self.assertEqual(stats["deleted"], 0)
+
+    def test_polymarket_no_parquet_blocks_delete(self) -> None:
+        jsonl, _parquet = _polymarket_metadata_paths(self.root)
+        _write_jsonl(jsonl, age_hours=48.0)
+        self.state_path.write_text(
+            json.dumps(
+                {"processed_files": [f"raw/{POLYMARKET}/prediction_metadata/2026-08-14/12-00-00.jsonl"]}
+            ),
+            encoding="utf-8",
+        )
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
         self.assertTrue(jsonl.exists())
         self.assertEqual(stats["deleted"], 0)
-        self.assertEqual(stats["skipped_polymarket"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 1)
+
+    def test_polymarket_grace_blocks_delete(self) -> None:
+        jsonl, parquet = _polymarket_metadata_paths(self.root)
+        _write_jsonl(jsonl, age_hours=1.0)
+        _write_parquet(parquet)
+        self.state_path.write_text(
+            json.dumps(
+                {"processed_files": [f"raw/{POLYMARKET}/prediction_metadata/2026-08-14/12-00-00.jsonl"]}
+            ),
+            encoding="utf-8",
+        )
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+            grace_hours=24.0,
+        )
+
+        self.assertTrue(jsonl.exists())
+        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["skipped_grace"], 1)
+
+    def test_polymarket_backlog_blocks_delete(self) -> None:
+        jsonl, parquet = _polymarket_metadata_paths(self.root, batch_stamp="12-00-00")
+        pending, _ = _polymarket_metadata_paths(self.root, batch_stamp="12-01-00")
+        _write_jsonl(jsonl, age_hours=48.0)
+        _write_jsonl(pending, age_hours=48.0)
+        _write_parquet(parquet)
+        self.state_path.write_text(
+            json.dumps(
+                {"processed_files": [f"raw/{POLYMARKET}/prediction_metadata/2026-08-14/12-00-00.jsonl"]}
+            ),
+            encoding="utf-8",
+        )
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
+        self.assertTrue(jsonl.exists())
+        self.assertTrue(pending.exists())
+        self.assertEqual(stats["run_skipped_backlog"], 1)
+        self.assertEqual(stats["deleted"], 0)
 
     def test_empty_raw_directories_removed_after_delete(self) -> None:
         jsonl, parquet = _binance_trade_paths(self.root)
