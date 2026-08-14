@@ -62,3 +62,48 @@ parquet_raw_backlog_files = Gauge(
     "Unprocessed raw JSONL files waiting for parquet conversion.",
     ["category"],
 )
+
+# --- Raw retention (optional normalizer poller) ---
+
+raw_retention_last_run_timestamp = Gauge(
+    "mdp_raw_retention_last_run_timestamp_seconds",
+    "Unix timestamp of the last raw retention run.",
+)
+
+raw_retention_would_delete_files = Gauge(
+    "mdp_raw_retention_would_delete_files",
+    "Raw JSONL files that would be deleted on the last dry-run retention pass.",
+)
+
+raw_retention_would_delete_bytes = Gauge(
+    "mdp_raw_retention_would_delete_bytes",
+    "Bytes that would be freed on the last dry-run retention pass.",
+)
+
+raw_retention_files_deleted_total = Counter(
+    "mdp_raw_retention_files_deleted_total",
+    "Total raw JSONL files deleted by live retention runs.",
+)
+
+raw_retention_bytes_freed_total = Counter(
+    "mdp_raw_retention_bytes_freed_total",
+    "Total bytes freed by live raw retention runs.",
+)
+
+raw_retention_run_skipped = Gauge(
+    "mdp_raw_retention_run_skipped",
+    "1 when the last retention run was skipped entirely.",
+    ["reason"],
+)
+
+raw_retention_skipped_files_last_run = Gauge(
+    "mdp_raw_retention_skipped_files_last_run",
+    "Files skipped on the last retention run, by reason, exchange, and category.",
+    ["reason", "exchange", "category"],
+)
+
+raw_retention_backlog_blocked_files = Gauge(
+    "mdp_raw_retention_backlog_blocked_files",
+    "Unprocessed raw files that blocked the last retention run, by category.",
+    ["category"],
+)

@@ -79,9 +79,36 @@ Registry: `src/datasets.py` — add new sources/categories here first.
 
 **Project goal:** collect raw JSONL and write immutable normalized parquet batches — nothing else.
 
-Normalizer state lives in `state/processed.json` (which raw JSONL files were normalized). Parquet batches live under `data/`. Raw JSONL is **never deleted** by the normalizer.
+Normalizer state lives in `state/processed.json` (which raw JSONL files were normalized). Parquet batches live under `data/`. By default raw JSONL is **not deleted**. Optional retention (feature-flagged) deletes eligible raw batches daily; see **Raw retention** below.
 
 **Never run two processes on `:9101`** (old converter loop + normalizer loop).
+
+### Raw retention (optional, v1)
+
+Module: `src/normalizer/raw_retention.py`, wired into `normalize_parquet.py --loop`.
+
+**Defaults:** disabled; when enabled, dry-run is true; interval 86400s; grace 24h.
+
+**Delete only when all gates pass:**
+
+1. Matching batch parquet exists (`batch_parquet_path_from_jsonl`).
+2. Raw mtime older than grace period.
+3. Global backlog zero (`collect_backlog_metrics`, not Prometheus reads).
+4. Source/category has `has_parquet_pipeline=True`.
+5. Source is **not Polymarket** (default) — PM token registry seed and outcome backfill still read raw metadata.
+
+`processed.json` is backlog signal only, not deletion proof.
+
+**Metrics on `:9101`:** `mdp_raw_retention_would_delete_*` (dry-run), `mdp_raw_retention_files_deleted_total` / `mdp_raw_retention_bytes_freed_total` (live), skip gauges labeled by `reason/exchange/category`, backlog block gauges by `category`.
+
+**Operator rollout (manual restart required):**
+
+1. Enable dry-run:  
+   `./venv/bin/python -u src/normalize_parquet.py --loop --raw-retention-enabled`
+2. Review logs/metrics for one day (check skip breakdown and backlog block detail).
+3. Live delete: add `--no-raw-retention-dry-run` (operator restarts normalizer manually).
+
+Polymarket raw is **always excluded in v1** (token registry seed + outcome backfill depend on raw metadata). There is no CLI flag to include it.
 
 ### Cutover from legacy converter
 

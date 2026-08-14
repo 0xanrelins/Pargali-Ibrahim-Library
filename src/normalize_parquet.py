@@ -11,6 +11,12 @@ import time
 from metrics.exporter import DEFAULT_PIPELINE_METRICS_PORT, start_exporter
 from metrics.storage_scanner import collect_storage_metrics, start_storage_poller
 from normalizer.paths import project_paths
+from normalizer.raw_retention import (
+    DEFAULT_GRACE_HOURS,
+    DEFAULT_RETENTION_INTERVAL_SEC,
+    RawRetentionConfig,
+    start_raw_retention_poller,
+)
 from normalizer.runner import NORMALIZE_INTERVAL_SEC, normalize_once
 
 logger = logging.getLogger(__name__)
@@ -36,7 +42,7 @@ def sleep_until_stop(seconds: float) -> None:
         time.sleep(min(1.0, deadline - time.monotonic()))
 
 
-def run_loop() -> None:
+def run_loop(*, retention_config: RawRetentionConfig) -> None:
     global stop_requested
 
     signal.signal(signal.SIGINT, request_stop)
@@ -51,6 +57,7 @@ def run_loop() -> None:
         raw_root=raw_root,
         data_root=data_root,
     )
+    retention_poller = start_raw_retention_poller(config=retention_config)
     logger.info(
         "Prometheus normalizer metrics: http://127.0.0.1:%s/metrics",
         DEFAULT_PIPELINE_METRICS_PORT,
@@ -68,6 +75,8 @@ def run_loop() -> None:
             logger.info("Next normalize batch in %s seconds", NORMALIZE_INTERVAL_SEC)
             sleep_until_stop(NORMALIZE_INTERVAL_SEC)
     finally:
+        if retention_poller is not None:
+            retention_poller.stop()
         storage_poller.stop()
 
     logger.info("Normalizer loop stopped")
@@ -88,7 +97,39 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run normalization continuously until interrupted.",
     )
+    parser.add_argument(
+        "--raw-retention-enabled",
+        action="store_true",
+        help="Enable daily raw JSONL retention poller (default: disabled).",
+    )
+    parser.add_argument(
+        "--raw-retention-dry-run",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When retention is enabled, report candidates without deleting (default: true).",
+    )
+    parser.add_argument(
+        "--raw-retention-grace-hours",
+        type=float,
+        default=DEFAULT_GRACE_HOURS,
+        help="Hours to keep raw after parquet exists before deletion (default: 24).",
+    )
+    parser.add_argument(
+        "--raw-retention-interval-sec",
+        type=float,
+        default=DEFAULT_RETENTION_INTERVAL_SEC,
+        help="Seconds between retention runs (default: 86400).",
+    )
     return parser
+
+
+def retention_config_from_args(args: argparse.Namespace) -> RawRetentionConfig:
+    return RawRetentionConfig(
+        enabled=args.raw_retention_enabled,
+        dry_run=args.raw_retention_dry_run,
+        grace_hours=args.raw_retention_grace_hours,
+        interval_sec=args.raw_retention_interval_sec,
+    )
 
 
 def main() -> int:
@@ -100,9 +141,10 @@ def main() -> int:
 
     parser = build_parser()
     args = parser.parse_args()
+    retention_config = retention_config_from_args(args)
 
     if args.loop:
-        run_loop()
+        run_loop(retention_config=retention_config)
         return 0
 
     start_exporter(port=DEFAULT_PIPELINE_METRICS_PORT)
