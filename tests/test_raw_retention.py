@@ -16,7 +16,7 @@ from metrics.pipeline_registry import (
     raw_retention_would_delete_bytes,
     raw_retention_would_delete_files,
 )
-from normalizer.raw_retention import run_raw_retention
+from normalizer.raw_retention import RawRetentionConfig, RawRetentionScheduler, run_raw_retention
 
 
 def _write_jsonl(path: Path, *, age_hours: float = 48.0) -> None:
@@ -325,6 +325,111 @@ class RawRetentionTests(unittest.TestCase):
         )
 
         self.assertFalse(date_dir.exists())
+
+
+class RawRetentionSchedulerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+        self.data_root = self.root / "data"
+        self.state_path = self.root / "state" / "processed.json"
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(json.dumps({"processed_files": []}), encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def _scheduler(self, *, interval_sec: float = 86_400.0, dry_run: bool = True) -> RawRetentionScheduler:
+        return RawRetentionScheduler(
+            config=RawRetentionConfig(
+                enabled=True,
+                dry_run=dry_run,
+                interval_sec=interval_sec,
+            ),
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+        )
+
+    def test_backlog_skip_retries_on_next_call_without_throttle(self) -> None:
+        jsonl, parquet = _binance_trade_paths(self.root, batch_stamp="12-00-00")
+        pending, _ = _binance_trade_paths(self.root, batch_stamp="12-01-00")
+        _write_jsonl(jsonl, age_hours=48.0)
+        _write_jsonl(pending, age_hours=48.0)
+        _write_parquet(parquet)
+        self.state_path.write_text(
+            json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
+            encoding="utf-8",
+        )
+        scheduler = self._scheduler(interval_sec=86_400.0)
+
+        first = scheduler.maybe_run_after_normalize()
+        second = scheduler.maybe_run_after_normalize()
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertEqual(first["run_skipped_backlog"], 1)
+        self.assertEqual(second["run_skipped_backlog"], 1)
+        self.assertEqual(second.get("run_skipped_throttle", 0), 0)
+
+    def test_backlog_clear_runs_retention_on_next_call(self) -> None:
+        jsonl, parquet = _binance_trade_paths(self.root, batch_stamp="12-00-00")
+        pending, pending_parquet = _binance_trade_paths(self.root, batch_stamp="12-01-00")
+        _write_jsonl(jsonl, age_hours=48.0)
+        _write_jsonl(pending, age_hours=48.0)
+        _write_parquet(parquet)
+        _write_parquet(pending_parquet)
+        self.state_path.write_text(
+            json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
+            encoding="utf-8",
+        )
+        scheduler = self._scheduler(dry_run=False)
+
+        blocked = scheduler.maybe_run_after_normalize()
+        self.assertIsNotNone(blocked)
+        assert blocked is not None
+        self.assertEqual(blocked["run_skipped_backlog"], 1)
+
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "processed_files": [
+                        f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl",
+                        f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-01-00.jsonl",
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cleared = scheduler.maybe_run_after_normalize()
+        self.assertIsNotNone(cleared)
+        assert cleared is not None
+        self.assertEqual(cleared.get("run_skipped_backlog", 0), 0)
+        self.assertGreaterEqual(cleared["deleted"], 1)
+        self.assertFalse(jsonl.exists())
+        self.assertFalse(pending.exists())
+
+    def test_evaluated_run_throttled_until_interval_elapses(self) -> None:
+        jsonl, parquet = _binance_trade_paths(self.root)
+        _write_jsonl(jsonl, age_hours=48.0)
+        _write_parquet(parquet)
+        self.state_path.write_text(
+            json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
+            encoding="utf-8",
+        )
+        scheduler = self._scheduler(interval_sec=3600.0, dry_run=True)
+
+        first = scheduler.maybe_run_after_normalize()
+        second = scheduler.maybe_run_after_normalize()
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None and second is not None
+        self.assertEqual(first.get("run_skipped_backlog", 0), 0)
+        self.assertEqual(first["would_delete"], 1)
+        self.assertEqual(second.get("run_skipped_throttle"), 1)
 
 
 if __name__ == "__main__":
