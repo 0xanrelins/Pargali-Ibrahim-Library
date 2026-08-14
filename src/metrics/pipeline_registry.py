@@ -98,6 +98,12 @@ raw_retention_run_skipped = Gauge(
 
 raw_retention_skipped_files_last_run = Gauge(
     "mdp_raw_retention_skipped_files_last_run",
-    "Files skipped on the last retention run, by reason.",
-    ["reason"],
+    "Files skipped on the last retention run, by reason, exchange, and category.",
+    ["reason", "exchange", "category"],
+)
+
+raw_retention_backlog_blocked_files = Gauge(
+    "mdp_raw_retention_backlog_blocked_files",
+    "Unprocessed raw files that blocked the last retention run, by category.",
+    ["category"],
 )

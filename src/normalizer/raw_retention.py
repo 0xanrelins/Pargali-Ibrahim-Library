@@ -5,11 +5,14 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import DefaultDict
 
-from datasets import POLYMARKET, REGISTERED_SOURCES, iter_jsonl_paths, raw_root
+from datasets import POLYMARKET, REGISTERED_SOURCES, all_categories, iter_jsonl_paths, raw_root
 from metrics.pipeline_registry import (
+    raw_retention_backlog_blocked_files,
     raw_retention_bytes_freed_total,
     raw_retention_files_deleted_total,
     raw_retention_last_run_timestamp,
@@ -31,6 +34,8 @@ SKIP_REASON_GRACE = "grace"
 SKIP_REASON_POLYMARKET = "polymarket_excluded"
 SKIP_REASON_BACKLOG = "backlog"
 
+SkipKey = tuple[str, str, str]
+
 
 @dataclass(frozen=True)
 class RawRetentionConfig:
@@ -38,7 +43,34 @@ class RawRetentionConfig:
     dry_run: bool = True
     grace_hours: float = DEFAULT_GRACE_HOURS
     interval_sec: float = DEFAULT_RETENTION_INTERVAL_SEC
-    exclude_polymarket: bool = True
+
+
+@dataclass
+class RawRetentionStats:
+    run_skipped_backlog: int = 0
+    would_delete: int = 0
+    deleted: int = 0
+    bytes_would_free: int = 0
+    bytes_freed: int = 0
+    skipped_no_parquet: int = 0
+    skipped_grace: int = 0
+    skipped_polymarket: int = 0
+    errors: int = 0
+    backlog_by_category: dict[str, int] = field(default_factory=dict)
+    skip_by_source: DefaultDict[SkipKey, int] = field(default_factory=lambda: defaultdict(int))
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "run_skipped_backlog": self.run_skipped_backlog,
+            "would_delete": self.would_delete,
+            "deleted": self.deleted,
+            "bytes_would_free": self.bytes_would_free,
+            "bytes_freed": self.bytes_freed,
+            "skipped_no_parquet": self.skipped_no_parquet,
+            "skipped_grace": self.skipped_grace,
+            "skipped_polymarket": self.skipped_polymarket,
+            "errors": self.errors,
+        }
 
 
 def _remove_empty_dirs(root: Path) -> None:
@@ -50,48 +82,85 @@ def _remove_empty_dirs(root: Path) -> None:
             path.rmdir()
 
 
-def _global_backlog_total(*, project_root: Path, state_path: Path) -> int:
-    backlog = collect_backlog_metrics(project_root=project_root, state_path=state_path)
-    return sum(backlog.values())
+def _iter_retention_skip_label_sets() -> list[SkipKey]:
+    labels: list[SkipKey] = []
+    for source in REGISTERED_SOURCES.values():
+        if not source.has_parquet_pipeline:
+            continue
+        for category in source.categories:
+            labels.append((SKIP_REASON_NO_PARQUET, source.exchange, category))
+            labels.append((SKIP_REASON_GRACE, source.exchange, category))
+            labels.append((SKIP_REASON_POLYMARKET, source.exchange, category))
+    return labels
 
 
 def _reset_skip_gauges() -> None:
-    for reason in (
-        SKIP_REASON_NO_PARQUET,
-        SKIP_REASON_GRACE,
-        SKIP_REASON_POLYMARKET,
-    ):
-        raw_retention_skipped_files_last_run.labels(reason=reason).set(0.0)
+    for reason, exchange, category in _iter_retention_skip_label_sets():
+        raw_retention_skipped_files_last_run.labels(
+            reason=reason,
+            exchange=exchange,
+            category=category,
+        ).set(0.0)
     raw_retention_run_skipped.labels(reason=SKIP_REASON_BACKLOG).set(0.0)
+    for category in all_categories():
+        raw_retention_backlog_blocked_files.labels(category=category).set(0.0)
 
 
-def publish_retention_metrics(stats: dict[str, int], *, dry_run: bool) -> None:
+def publish_retention_metrics(stats: RawRetentionStats, *, dry_run: bool) -> None:
     raw_retention_last_run_timestamp.set(time.time())
     _reset_skip_gauges()
 
-    if stats.get("run_skipped_backlog", 0):
+    if stats.run_skipped_backlog:
         raw_retention_run_skipped.labels(reason=SKIP_REASON_BACKLOG).set(1.0)
+        for category, count in stats.backlog_by_category.items():
+            if count > 0:
+                raw_retention_backlog_blocked_files.labels(category=category).set(float(count))
         raw_retention_would_delete_files.set(0.0)
         raw_retention_would_delete_bytes.set(0.0)
         return
 
-    raw_retention_skipped_files_last_run.labels(reason=SKIP_REASON_NO_PARQUET).set(
-        float(stats.get("skipped_no_parquet", 0))
-    )
-    raw_retention_skipped_files_last_run.labels(reason=SKIP_REASON_GRACE).set(
-        float(stats.get("skipped_grace", 0))
-    )
-    raw_retention_skipped_files_last_run.labels(reason=SKIP_REASON_POLYMARKET).set(
-        float(stats.get("skipped_polymarket", 0))
-    )
+    for (reason, exchange, category), count in stats.skip_by_source.items():
+        if count > 0:
+            raw_retention_skipped_files_last_run.labels(
+                reason=reason,
+                exchange=exchange,
+                category=category,
+            ).set(float(count))
 
     if dry_run:
-        raw_retention_would_delete_files.set(float(stats.get("would_delete", 0)))
-        raw_retention_would_delete_bytes.set(float(stats.get("bytes_would_free", 0)))
+        raw_retention_would_delete_files.set(float(stats.would_delete))
+        raw_retention_would_delete_bytes.set(float(stats.bytes_would_free))
         return
 
     raw_retention_would_delete_files.set(0.0)
     raw_retention_would_delete_bytes.set(0.0)
+
+
+def _record_skip(
+    stats: RawRetentionStats,
+    *,
+    reason: str,
+    exchange: str,
+    category: str,
+) -> None:
+    stats.skip_by_source[(reason, exchange, category)] += 1
+    if reason == SKIP_REASON_NO_PARQUET:
+        stats.skipped_no_parquet += 1
+    elif reason == SKIP_REASON_GRACE:
+        stats.skipped_grace += 1
+    elif reason == SKIP_REASON_POLYMARKET:
+        stats.skipped_polymarket += 1
+
+
+def _log_skip_summary(stats: RawRetentionStats) -> None:
+    if not stats.skip_by_source:
+        return
+    breakdown = {
+        f"{exchange}/{category}/{reason}": count
+        for (reason, exchange, category), count in sorted(stats.skip_by_source.items())
+        if count > 0
+    }
+    logger.info("Raw retention skip breakdown: %s", breakdown)
 
 
 def run_raw_retention(
@@ -101,30 +170,25 @@ def run_raw_retention(
     state_path: Path,
     grace_hours: float = DEFAULT_GRACE_HOURS,
     dry_run: bool = True,
-    exclude_polymarket: bool = True,
 ) -> dict[str, int]:
     """Delete eligible raw JSONL batches or report dry-run candidates."""
-    stats = {
-        "run_skipped_backlog": 0,
-        "would_delete": 0,
-        "deleted": 0,
-        "bytes_would_free": 0,
-        "bytes_freed": 0,
-        "skipped_no_parquet": 0,
-        "skipped_grace": 0,
-        "skipped_polymarket": 0,
-        "errors": 0,
-    }
+    stats = RawRetentionStats()
 
-    backlog_total = _global_backlog_total(project_root=project_root, state_path=state_path)
+    backlog_by_category = collect_backlog_metrics(
+        project_root=project_root,
+        state_path=state_path,
+    )
+    backlog_total = sum(backlog_by_category.values())
     if backlog_total > 0:
-        stats["run_skipped_backlog"] = 1
+        stats.run_skipped_backlog = 1
+        stats.backlog_by_category = dict(backlog_by_category)
         logger.info(
-            "Raw retention skipped — backlog=%s unprocessed raw files",
+            "Raw retention skipped — backlog_total=%s backlog_by_category=%s",
             backlog_total,
+            backlog_by_category,
         )
         publish_retention_metrics(stats, dry_run=dry_run)
-        return stats
+        return stats.as_dict()
 
     cutoff_ts = time.time() - (grace_hours * 3600)
 
@@ -132,13 +196,21 @@ def run_raw_retention(
         if not source.has_parquet_pipeline:
             continue
 
-        if exclude_polymarket and source.exchange == POLYMARKET:
-            exchange_raw_root = raw_root(project_root, source.exchange)
+        exchange_raw_root = raw_root(project_root, source.exchange)
+        if source.exchange == POLYMARKET:
             for category in source.categories:
-                stats["skipped_polymarket"] += len(iter_jsonl_paths(exchange_raw_root, category))
+                pm_count = len(iter_jsonl_paths(exchange_raw_root, category))
+                stats.skipped_polymarket += pm_count
+                if pm_count:
+                    stats.skip_by_source[(SKIP_REASON_POLYMARKET, source.exchange, category)] = pm_count
+                    logger.info(
+                        "Raw retention skipped Polymarket raw — exchange=%s category=%s files=%s",
+                        source.exchange,
+                        category,
+                        pm_count,
+                    )
             continue
 
-        exchange_raw_root = raw_root(project_root, source.exchange)
         for category in source.categories:
             for jsonl_path in iter_jsonl_paths(exchange_raw_root, category):
                 parquet_path = batch_parquet_path_from_jsonl(
@@ -147,7 +219,12 @@ def run_raw_retention(
                     data_root=data_root,
                 )
                 if not parquet_path.exists():
-                    stats["skipped_no_parquet"] += 1
+                    _record_skip(
+                        stats,
+                        reason=SKIP_REASON_NO_PARQUET,
+                        exchange=source.exchange,
+                        category=category,
+                    )
                     continue
 
                 try:
@@ -156,38 +233,57 @@ def run_raw_retention(
                     continue
 
                 if file_stat.st_mtime > cutoff_ts:
-                    stats["skipped_grace"] += 1
+                    _record_skip(
+                        stats,
+                        reason=SKIP_REASON_GRACE,
+                        exchange=source.exchange,
+                        category=category,
+                    )
                     continue
 
                 rel_path = relative_to_project(jsonl_path, project_root)
                 file_size = file_stat.st_size
 
                 if dry_run:
-                    stats["would_delete"] += 1
-                    stats["bytes_would_free"] += file_size
+                    stats.would_delete += 1
+                    stats.bytes_would_free += file_size
                     logger.info(
-                        "Dry-run: would delete %s (%s bytes)",
+                        "Dry-run: would delete %s (%s bytes) exchange=%s category=%s",
                         rel_path,
                         file_size,
+                        source.exchange,
+                        category,
                     )
                     continue
 
                 try:
                     jsonl_path.unlink()
-                    stats["deleted"] += 1
-                    stats["bytes_freed"] += file_size
+                    stats.deleted += 1
+                    stats.bytes_freed += file_size
                     raw_retention_files_deleted_total.inc()
                     raw_retention_bytes_freed_total.inc(file_size)
-                    logger.info("Deleted processed raw file %s (%s bytes)", rel_path, file_size)
+                    logger.info(
+                        "Deleted processed raw file %s (%s bytes) exchange=%s category=%s",
+                        rel_path,
+                        file_size,
+                        source.exchange,
+                        category,
+                    )
                 except OSError:
-                    stats["errors"] += 1
-                    logger.exception("Failed to delete raw file: %s", jsonl_path)
+                    stats.errors += 1
+                    logger.exception(
+                        "Failed to delete raw file: %s exchange=%s category=%s",
+                        jsonl_path,
+                        source.exchange,
+                        category,
+                    )
 
-    if not dry_run and stats["deleted"] > 0:
+    if not dry_run and stats.deleted > 0:
         _remove_empty_dirs(project_root / "raw")
 
+    _log_skip_summary(stats)
     publish_retention_metrics(stats, dry_run=dry_run)
-    return stats
+    return stats.as_dict()
 
 
 class RawRetentionPoller:
@@ -217,11 +313,10 @@ class RawRetentionPoller:
         )
         self._thread.start()
         logger.info(
-            "Raw retention poller started (interval=%ss, grace=%sh, dry_run=%s, exclude_polymarket=%s)",
+            "Raw retention poller started (interval=%ss, grace=%sh, dry_run=%s, polymarket=excluded)",
             self.config.interval_sec,
             self.config.grace_hours,
             self.config.dry_run,
-            self.config.exclude_polymarket,
         )
 
     def stop(self) -> None:
@@ -239,7 +334,6 @@ class RawRetentionPoller:
                     state_path=self.state_path,
                     grace_hours=self.config.grace_hours,
                     dry_run=self.config.dry_run,
-                    exclude_polymarket=self.config.exclude_polymarket,
                 )
                 if stats.get("run_skipped_backlog"):
                     logger.info("Raw retention complete — skipped (backlog)")

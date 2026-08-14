@@ -211,7 +211,6 @@ class RawRetentionTests(unittest.TestCase):
             data_root=self.data_root,
             state_path=self.state_path,
             dry_run=False,
-            exclude_polymarket=True,
         )
 
         self.assertTrue(jsonl.exists())

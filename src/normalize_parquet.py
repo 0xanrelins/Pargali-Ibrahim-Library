@@ -120,11 +120,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_RETENTION_INTERVAL_SEC,
         help="Seconds between retention runs (default: 86400).",
     )
-    parser.add_argument(
-        "--raw-retention-include-polymarket",
-        action="store_true",
-        help="Include Polymarket raw in retention (default: excluded in v1).",
-    )
     return parser
 
 
@@ -134,7 +129,6 @@ def retention_config_from_args(args: argparse.Namespace) -> RawRetentionConfig:
         dry_run=args.raw_retention_dry_run,
         grace_hours=args.raw_retention_grace_hours,
         interval_sec=args.raw_retention_interval_sec,
-        exclude_polymarket=not args.raw_retention_include_polymarket,
     )
 
 

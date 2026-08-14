@@ -99,15 +99,16 @@ Module: `src/normalizer/raw_retention.py`, wired into `normalize_parquet.py --lo
 
 `processed.json` is backlog signal only, not deletion proof.
 
-**Metrics on `:9101`:** `mdp_raw_retention_would_delete_*` (dry-run), `mdp_raw_retention_files_deleted_total` / `mdp_raw_retention_bytes_freed_total` (live), skip gauges for backlog/no_parquet/grace/polymarket.
+**Metrics on `:9101`:** `mdp_raw_retention_would_delete_*` (dry-run), `mdp_raw_retention_files_deleted_total` / `mdp_raw_retention_bytes_freed_total` (live), skip gauges labeled by `reason/exchange/category`, backlog block gauges by `category`.
 
 **Operator rollout (manual restart required):**
 
 1. Enable dry-run:  
    `./venv/bin/python -u src/normalize_parquet.py --loop --raw-retention-enabled`
-2. Review logs/metrics for one day.
+2. Review logs/metrics for one day (check skip breakdown and backlog block detail).
 3. Live delete: add `--no-raw-retention-dry-run` (operator restarts normalizer manually).
-4. Polymarket remains excluded unless `--raw-retention-include-polymarket` (not recommended in v1).
+
+Polymarket raw is **always excluded in v1** (token registry seed + outcome backfill depend on raw metadata). There is no CLI flag to include it.
 
 ### Cutover from legacy converter
 
