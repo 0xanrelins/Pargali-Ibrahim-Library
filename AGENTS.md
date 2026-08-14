@@ -85,9 +85,16 @@ Normalizer state lives in `state/processed.json` (which raw JSONL files were nor
 
 ### Raw retention (optional, v1)
 
-Module: `src/normalizer/raw_retention.py`, wired into `normalize_parquet.py --loop`.
+Module: `src/normalizer/raw_retention.py`, triggered from `normalize_parquet.py --loop` **after each `normalize_once()` batch**.
 
-**Defaults:** disabled; when enabled, dry-run is true; interval 86400s; grace 24h.
+**Defaults:** disabled; when enabled, dry-run is true; evaluation interval 86400s (throttle applies only after a full evaluation); grace 24h.
+
+**Scheduling:**
+
+- No independent retention thread.
+- After each normalize batch, retention is attempted.
+- If backlog > 0, skip and **retry on the next normalize cycle** (~60s) — backlog skips do not start the interval throttle.
+- After a full candidate evaluation (dry-run or live delete), wait `interval_sec` before evaluating again.
 
 **Delete only when all gates pass:**
 

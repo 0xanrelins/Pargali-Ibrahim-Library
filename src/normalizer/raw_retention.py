@@ -1,9 +1,8 @@
-"""Conservative daily raw JSONL retention after immutable parquet batches exist."""
+"""Conservative raw JSONL retention after immutable parquet batches exist."""
 
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -32,6 +31,7 @@ DEFAULT_GRACE_HOURS = 24.0
 SKIP_REASON_NO_PARQUET = "no_parquet"
 SKIP_REASON_GRACE = "grace"
 SKIP_REASON_BACKLOG = "backlog"
+SKIP_REASON_THROTTLE = "throttle"
 
 SkipKey = tuple[str, str, str]
 
@@ -47,6 +47,7 @@ class RawRetentionConfig:
 @dataclass
 class RawRetentionStats:
     run_skipped_backlog: int = 0
+    run_skipped_throttle: int = 0
     would_delete: int = 0
     deleted: int = 0
     bytes_would_free: int = 0
@@ -60,6 +61,7 @@ class RawRetentionStats:
     def as_dict(self) -> dict[str, int]:
         return {
             "run_skipped_backlog": self.run_skipped_backlog,
+            "run_skipped_throttle": self.run_skipped_throttle,
             "would_delete": self.would_delete,
             "deleted": self.deleted,
             "bytes_would_free": self.bytes_would_free,
@@ -68,6 +70,69 @@ class RawRetentionStats:
             "skipped_grace": self.skipped_grace,
             "errors": self.errors,
         }
+
+
+@dataclass
+class RawRetentionScheduler:
+    """Run retention after normalize batches with interval throttle on evaluation only."""
+
+    config: RawRetentionConfig
+    project_root: Path | None = None
+    data_root: Path | None = None
+    state_path: Path | None = None
+    _last_evaluated_at: float | None = field(default=None, init=False, repr=False)
+
+    def _resolve_paths(self) -> tuple[Path, Path, Path]:
+        if self.project_root is not None and self.data_root is not None and self.state_path is not None:
+            return self.project_root, self.data_root, self.state_path
+        project_root, data_root, state_path, _ = project_paths()
+        return project_root, data_root, state_path
+
+    def maybe_run_after_normalize(self) -> dict[str, int] | None:
+        if not self.config.enabled:
+            return None
+
+        if self._last_evaluated_at is not None:
+            elapsed = time.monotonic() - self._last_evaluated_at
+            if elapsed < self.config.interval_sec:
+                logger.info(
+                    "Raw retention throttled — %.0fs since last evaluation (interval=%ss)",
+                    elapsed,
+                    self.config.interval_sec,
+                )
+                return {"run_skipped_throttle": 1}
+
+        project_root, data_root, state_path = self._resolve_paths()
+        stats = run_raw_retention(
+            project_root=project_root,
+            data_root=data_root,
+            state_path=state_path,
+            grace_hours=self.config.grace_hours,
+            dry_run=self.config.dry_run,
+        )
+
+        if stats.get("run_skipped_backlog"):
+            logger.info("Raw retention skipped (backlog) — will retry after next normalize batch")
+            return stats
+
+        self._last_evaluated_at = time.monotonic()
+        if self.config.dry_run:
+            logger.info(
+                "Raw retention dry-run complete — would_delete: %s, bytes: %s, "
+                "skipped_no_parquet: %s, skipped_grace: %s",
+                stats["would_delete"],
+                stats["bytes_would_free"],
+                stats["skipped_no_parquet"],
+                stats["skipped_grace"],
+            )
+        else:
+            logger.info(
+                "Raw retention complete — deleted: %s, bytes_freed: %s, errors: %s",
+                stats["deleted"],
+                stats["bytes_freed"],
+                stats["errors"],
+            )
+        return stats
 
 
 def _remove_empty_dirs(root: Path) -> None:
@@ -98,6 +163,7 @@ def _reset_skip_gauges() -> None:
             category=category,
         ).set(0.0)
     raw_retention_run_skipped.labels(reason=SKIP_REASON_BACKLOG).set(0.0)
+    raw_retention_run_skipped.labels(reason=SKIP_REASON_THROTTLE).set(0.0)
     for category in all_categories():
         raw_retention_backlog_blocked_files.labels(category=category).set(0.0)
 
@@ -264,90 +330,3 @@ def run_raw_retention(
     _log_skip_summary(stats)
     publish_retention_metrics(stats, dry_run=dry_run)
     return stats.as_dict()
-
-
-class RawRetentionPoller:
-    def __init__(
-        self,
-        *,
-        project_root: Path,
-        data_root: Path,
-        state_path: Path,
-        config: RawRetentionConfig,
-    ) -> None:
-        self.project_root = project_root
-        self.data_root = data_root
-        self.state_path = state_path
-        self.config = config
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            name="raw-retention-poller",
-            daemon=True,
-        )
-        self._thread.start()
-        logger.info(
-            "Raw retention poller started (interval=%ss, grace=%sh, dry_run=%s)",
-            self.config.interval_sec,
-            self.config.grace_hours,
-            self.config.dry_run,
-        )
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=self.config.interval_sec + 1)
-        logger.info("Raw retention poller stopped")
-
-    def _run(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                stats = run_raw_retention(
-                    project_root=self.project_root,
-                    data_root=self.data_root,
-                    state_path=self.state_path,
-                    grace_hours=self.config.grace_hours,
-                    dry_run=self.config.dry_run,
-                )
-                if stats.get("run_skipped_backlog"):
-                    logger.info("Raw retention complete — skipped (backlog)")
-                elif self.config.dry_run:
-                    logger.info(
-                        "Raw retention dry-run complete — would_delete: %s, bytes: %s, "
-                        "skipped_no_parquet: %s, skipped_grace: %s",
-                        stats["would_delete"],
-                        stats["bytes_would_free"],
-                        stats["skipped_no_parquet"],
-                        stats["skipped_grace"],
-                    )
-                else:
-                    logger.info(
-                        "Raw retention complete — deleted: %s, bytes_freed: %s, errors: %s",
-                        stats["deleted"],
-                        stats["bytes_freed"],
-                        stats["errors"],
-                    )
-            except Exception:
-                logger.exception("Raw retention failed")
-            self._stop_event.wait(self.config.interval_sec)
-
-
-def start_raw_retention_poller(*, config: RawRetentionConfig) -> RawRetentionPoller | None:
-    if not config.enabled:
-        return None
-
-    project_root, data_root, state_path, _ = project_paths()
-    poller = RawRetentionPoller(
-        project_root=project_root,
-        data_root=data_root,
-        state_path=state_path,
-        config=config,
-    )
-    poller.start()
-    return poller

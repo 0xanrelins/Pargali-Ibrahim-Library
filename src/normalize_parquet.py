@@ -15,7 +15,7 @@ from normalizer.raw_retention import (
     DEFAULT_GRACE_HOURS,
     DEFAULT_RETENTION_INTERVAL_SEC,
     RawRetentionConfig,
-    start_raw_retention_poller,
+    RawRetentionScheduler,
 )
 from normalizer.runner import NORMALIZE_INTERVAL_SEC, normalize_once
 
@@ -57,11 +57,18 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
         raw_root=raw_root,
         data_root=data_root,
     )
-    retention_poller = start_raw_retention_poller(config=retention_config)
+    retention_scheduler = RawRetentionScheduler(config=retention_config)
     logger.info(
         "Prometheus normalizer metrics: http://127.0.0.1:%s/metrics",
         DEFAULT_PIPELINE_METRICS_PORT,
     )
+    if retention_config.enabled:
+        logger.info(
+            "Raw retention enabled (dry_run=%s, grace=%sh, interval=%ss after evaluation)",
+            retention_config.dry_run,
+            retention_config.grace_hours,
+            retention_config.interval_sec,
+        )
     logger.info("Starting normalizer loop (interval=%ss)", NORMALIZE_INTERVAL_SEC)
 
     try:
@@ -69,14 +76,16 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
             stats = normalize_once()
             log_stats(stats, label="Normalize batch complete")
 
+            retention_stats = retention_scheduler.maybe_run_after_normalize()
+            if retention_stats is not None:
+                log_stats(retention_stats, label="Raw retention pass")
+
             if stop_requested:
                 break
 
             logger.info("Next normalize batch in %s seconds", NORMALIZE_INTERVAL_SEC)
             sleep_until_stop(NORMALIZE_INTERVAL_SEC)
     finally:
-        if retention_poller is not None:
-            retention_poller.stop()
         storage_poller.stop()
 
     logger.info("Normalizer loop stopped")
@@ -100,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--raw-retention-enabled",
         action="store_true",
-        help="Enable daily raw JSONL retention poller (default: disabled).",
+        help="Enable raw JSONL retention after each normalize batch (default: disabled).",
     )
     parser.add_argument(
         "--raw-retention-dry-run",
@@ -118,7 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--raw-retention-interval-sec",
         type=float,
         default=DEFAULT_RETENTION_INTERVAL_SEC,
-        help="Seconds between retention runs (default: 86400).",
+        help="Minimum seconds between retention evaluations (default: 86400).",
     )
     return parser
 

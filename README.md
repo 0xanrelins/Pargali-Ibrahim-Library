@@ -228,7 +228,7 @@ BTC symbol lists: `TARGET_SYMBOLS` / `TRADE_MARKETS` in `collect_raw.py`.
 ## Operational notes
 
 - **No historical backfill** — recording starts when collectors connect.
-- **Raw retention (optional)** — by default the normalizer does **not** delete raw JSONL. Optional daily retention runs inside `normalize_parquet.py --loop` when explicitly enabled. Deletes raw (Binance and Polymarket) only when the matching batch parquet exists, grace period elapsed, and backlog is zero. See AGENTS.md for rollout.
+- **Raw retention (optional)** — by default the normalizer does **not** delete raw JSONL. When enabled, retention runs after each normalize batch in `--loop` (backlog blocks retry every ~60s; interval throttle applies only after a full evaluation). Deletes raw (Binance and Polymarket) only when the matching batch parquet exists, grace period elapsed, and backlog is zero. See AGENTS.md for rollout.
 - **Parquet backlog** — metric `mdp_pipeline_parquet_raw_backlog_files` on `:9101`.
 - **Liquidations are sparse** — empty liquidation batches are normal.
 - **Prometheus** scrapes host ports via `host.docker.internal` — keep collectors + normalizer running.
