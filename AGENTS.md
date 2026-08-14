@@ -94,10 +94,9 @@ Module: `src/normalizer/raw_retention.py`, wired into `normalize_parquet.py --lo
 1. Matching batch parquet exists (`batch_parquet_path_from_jsonl`).
 2. Raw mtime older than grace period.
 3. Global backlog zero (`collect_backlog_metrics`, not Prometheus reads).
-4. Source/category has `has_parquet_pipeline=True`.
-5. Source is **not Polymarket** (default) — PM token registry seed and outcome backfill still read raw metadata.
+4. Source/category has `has_parquet_pipeline=True` (Binance and Polymarket pipeline categories).
 
-`processed.json` is backlog signal only, not deletion proof.
+`processed.json` is backlog signal only, not deletion proof. Retention applies to Polymarket the same as Binance once the matching batch parquet exists.
 
 **Metrics on `:9101`:** `mdp_raw_retention_would_delete_*` (dry-run), `mdp_raw_retention_files_deleted_total` / `mdp_raw_retention_bytes_freed_total` (live), skip gauges labeled by `reason/exchange/category`, backlog block gauges by `category`.
 
@@ -108,7 +107,7 @@ Module: `src/normalizer/raw_retention.py`, wired into `normalize_parquet.py --lo
 2. Review logs/metrics for one day (check skip breakdown and backlog block detail).
 3. Live delete: add `--no-raw-retention-dry-run` (operator restarts normalizer manually).
 
-Polymarket raw is **always excluded in v1** (token registry seed + outcome backfill depend on raw metadata). There is no CLI flag to include it.
+Polymarket raw is included under the same gates after parquet exists. Unprocessed PM raw (including metadata used for token registry seed) remains until normalized.
 
 ### Cutover from legacy converter
 
