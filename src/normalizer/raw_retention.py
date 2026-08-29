@@ -25,8 +25,8 @@ from normalizer.runner import collect_backlog_metrics
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RETENTION_INTERVAL_SEC = 86_400.0
-DEFAULT_GRACE_HOURS = 24.0
+DEFAULT_RETENTION_INTERVAL_SEC = 3_600.0
+DEFAULT_GRACE_HOURS = 1.0
 
 SKIP_REASON_NO_PARQUET = "no_parquet"
 SKIP_REASON_GRACE = "grace"
