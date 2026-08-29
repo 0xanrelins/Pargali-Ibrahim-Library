@@ -16,7 +16,13 @@ from metrics.pipeline_registry import (
     raw_retention_would_delete_bytes,
     raw_retention_would_delete_files,
 )
-from normalizer.raw_retention import RawRetentionConfig, RawRetentionScheduler, run_raw_retention
+from normalizer.raw_retention import (
+    DEFAULT_GRACE_HOURS,
+    DEFAULT_RETENTION_INTERVAL_SEC,
+    RawRetentionConfig,
+    RawRetentionScheduler,
+    run_raw_retention,
+)
 
 
 def _write_jsonl(path: Path, *, age_hours: float = 48.0) -> None:
@@ -153,7 +159,7 @@ class RawRetentionTests(unittest.TestCase):
 
     def test_grace_period_blocks_delete(self) -> None:
         jsonl, parquet = _binance_trade_paths(self.root)
-        _write_jsonl(jsonl, age_hours=1.0)
+        _write_jsonl(jsonl, age_hours=0.5)
         _write_parquet(parquet)
         self.state_path.write_text(
             json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
@@ -165,7 +171,7 @@ class RawRetentionTests(unittest.TestCase):
             data_root=self.data_root,
             state_path=self.state_path,
             dry_run=False,
-            grace_hours=24.0,
+            grace_hours=DEFAULT_GRACE_HOURS,
         )
 
         self.assertTrue(jsonl.exists())
@@ -261,7 +267,7 @@ class RawRetentionTests(unittest.TestCase):
 
     def test_polymarket_grace_blocks_delete(self) -> None:
         jsonl, parquet = _polymarket_metadata_paths(self.root)
-        _write_jsonl(jsonl, age_hours=1.0)
+        _write_jsonl(jsonl, age_hours=0.5)
         _write_parquet(parquet)
         self.state_path.write_text(
             json.dumps(
@@ -275,7 +281,7 @@ class RawRetentionTests(unittest.TestCase):
             data_root=self.data_root,
             state_path=self.state_path,
             dry_run=False,
-            grace_hours=24.0,
+            grace_hours=DEFAULT_GRACE_HOURS,
         )
 
         self.assertTrue(jsonl.exists())
@@ -326,6 +332,11 @@ class RawRetentionTests(unittest.TestCase):
 
         self.assertFalse(date_dir.exists())
 
+    def test_default_config_values(self) -> None:
+        config = RawRetentionConfig(enabled=True)
+        self.assertEqual(config.grace_hours, 1.0)
+        self.assertEqual(config.interval_sec, 3_600.0)
+
 
 class RawRetentionSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -339,7 +350,7 @@ class RawRetentionSchedulerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
 
-    def _scheduler(self, *, interval_sec: float = 86_400.0, dry_run: bool = True) -> RawRetentionScheduler:
+    def _scheduler(self, *, interval_sec: float = DEFAULT_RETENTION_INTERVAL_SEC, dry_run: bool = True) -> RawRetentionScheduler:
         return RawRetentionScheduler(
             config=RawRetentionConfig(
                 enabled=True,
@@ -361,7 +372,7 @@ class RawRetentionSchedulerTests(unittest.TestCase):
             json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
             encoding="utf-8",
         )
-        scheduler = self._scheduler(interval_sec=86_400.0)
+        scheduler = self._scheduler(interval_sec=DEFAULT_RETENTION_INTERVAL_SEC)
 
         first = scheduler.maybe_run_after_normalize()
         second = scheduler.maybe_run_after_normalize()
@@ -419,7 +430,7 @@ class RawRetentionSchedulerTests(unittest.TestCase):
             json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
             encoding="utf-8",
         )
-        scheduler = self._scheduler(interval_sec=3600.0, dry_run=True)
+        scheduler = self._scheduler(interval_sec=DEFAULT_RETENTION_INTERVAL_SEC, dry_run=True)
 
         first = scheduler.maybe_run_after_normalize()
         second = scheduler.maybe_run_after_normalize()

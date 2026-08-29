@@ -79,7 +79,7 @@ Registry: `src/datasets.py` — add new sources/categories here first.
 
 **Project goal:** collect raw JSONL and write immutable normalized parquet batches — nothing else.
 
-Normalizer state lives in `state/processed.json` (which raw JSONL files were normalized). Parquet batches live under `data/`. By default raw JSONL is **not deleted**. Optional retention (feature-flagged) deletes eligible raw batches daily; see **Raw retention** below.
+Normalizer state lives in `state/processed.json` (which raw JSONL files were normalized). Parquet batches live under `data/`. By default raw JSONL is **not deleted**. Optional retention (feature-flagged) deletes eligible raw batches on an hourly schedule; see **Raw retention** below.
 
 **Never run two processes on `:9101`** (old converter loop + normalizer loop).
 
@@ -87,7 +87,7 @@ Normalizer state lives in `state/processed.json` (which raw JSONL files were nor
 
 Module: `src/normalizer/raw_retention.py`, triggered from `normalize_parquet.py --loop` **after each `normalize_once()` batch**.
 
-**Defaults:** disabled; when enabled, dry-run is true; evaluation interval 86400s (throttle applies only after a full evaluation); grace 24h.
+**Defaults:** disabled; when enabled, dry-run is true; evaluation interval 3600s (throttle applies only after a full evaluation); grace 1h.
 
 **Scheduling:**
 
@@ -111,7 +111,7 @@ Module: `src/normalizer/raw_retention.py`, triggered from `normalize_parquet.py 
 
 1. Enable dry-run:  
    `./venv/bin/python -u src/normalize_parquet.py --loop --raw-retention-enabled`
-2. Review logs/metrics for one day (check skip breakdown and backlog block detail).
+2. Review logs/metrics for one hour (check skip breakdown and backlog block detail).
 3. Live delete: add `--no-raw-retention-dry-run` (operator restarts normalizer manually).
 
 Polymarket raw is included under the same gates after parquet exists. Unprocessed PM raw (including metadata used for token registry seed) remains until normalized.

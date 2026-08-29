@@ -121,13 +121,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--raw-retention-grace-hours",
         type=float,
         default=DEFAULT_GRACE_HOURS,
-        help="Hours to keep raw after parquet exists before deletion (default: 24).",
+        help="Hours to keep raw after parquet exists before deletion (default: 1).",
     )
     parser.add_argument(
         "--raw-retention-interval-sec",
         type=float,
         default=DEFAULT_RETENTION_INTERVAL_SEC,
-        help="Minimum seconds between retention evaluations (default: 86400).",
+        help="Minimum seconds between retention evaluations (default: 3600).",
     )
     return parser
 
