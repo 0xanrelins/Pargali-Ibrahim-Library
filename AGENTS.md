@@ -37,6 +37,7 @@ Optional future tiers (derived, knowledge, agent) are under `archive/tier2/` —
 | `src/parse_raw.py` / `src/parse_polymarket.py` | JSONL → row dicts |
 | `src/normalize_parquet.py` | Normalizer CLI (`--once` / `--loop`) on `:9101` |
 | `src/normalizer/` | DuckDB writer, schemas, paths, runner (1 JSONL → 1 parquet) |
+| `src/rollup_parquet.py` | Derived rollup layer (`data_rollup/`, hourly + daily) — read-only on `data/` |
 | `src/convert_parquet.py` | **Deprecated** — delegates to `normalize_parquet.py` |
 | `archive/tier2/` | Derived, knowledge, agent, catalog, coverage, quality (not runtime) |
 | `src/polymarket/discovery.py` | Gamma API — active BTC 15m market |
@@ -69,7 +70,17 @@ Run Python with `PYTHONPATH=src` or from project root using `./venv/bin/python s
 raw/{exchange}/{category}/{date}/{time}.jsonl
 data/{category}/{exchange}/{symbol}/{date}/{time}.parquet   # immutable batches (current)
 data/{category}/{exchange}/{symbol}/{day}.parquet             # legacy daily rollup (deprecated)
+
+data_rollup/hourly/{category}/{exchange}/{symbol}/{date}/{HH}.parquet   # derived, last N days
+data_rollup/daily/{category}/{exchange}/{symbol}/{date}.parquet         # derived, all history
 ```
+
+`data_rollup/` is a **derived read layer** built by `src/rollup_parquet.py` — never
+the source of truth, never written by the normalizer, safe to delete and rebuild
+(`rm -rf data_rollup && ./venv/bin/python src/rollup_parquet.py --backfill`).
+`data/`, `raw/` and `state/` are only read by it. Retention verification keeps
+looking at `data/`. Timer: `infra/systemd/pargali-rollup.{service,timer}`
+(`--run` every 10 minutes, hourly rollups kept for `--hourly-days 7`).
 
 Registry: `src/datasets.py` — add new sources/categories here first.
 

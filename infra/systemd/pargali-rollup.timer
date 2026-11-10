@@ -1,0 +1,21 @@
+# Starts pargali-rollup.service every 10 minutes.
+#
+# Operator install (after merge, from the project root):
+#   cp infra/systemd/pargali-rollup.service infra/systemd/pargali-rollup.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now pargali-rollup.timer
+#
+# OnUnitActiveSec measures from the end of the previous run, so a slow pass
+# simply delays the next tick instead of piling up.
+
+[Unit]
+Description=Run the Pargali rollup layer every 10 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=10s
+Unit=pargali-rollup.service
+
+[Install]
+WantedBy=timers.target

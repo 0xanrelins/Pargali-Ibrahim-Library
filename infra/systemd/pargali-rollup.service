@@ -1,0 +1,37 @@
+# Derived rollup layer: data_rollup/hourly + data_rollup/daily.
+#
+# Operator install (after merge, from the project root):
+#   cp infra/systemd/pargali-rollup.service infra/systemd/pargali-rollup.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now pargali-rollup.timer
+#
+# One-shot unit started by pargali-rollup.timer every 10 minutes. systemd never
+# starts a second copy while this one is still running, so a long catch-up pass
+# cannot overlap the next tick. Adjust WorkingDirectory/ExecStart if the checkout
+# is not at /root/Pargali-Ibrahim-Library.
+
+[Unit]
+Description=Pargali rollup parquet layer (hourly + daily)
+Documentation=file:/root/Pargali-Ibrahim-Library/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/Pargali-Ibrahim-Library
+ExecStart=/root/Pargali-Ibrahim-Library/.venv/bin/python src/rollup_parquet.py --run --hourly-days 7
+
+# The rollup is a derived read layer: it must never compete with the collectors
+# or the normalizer for CPU or disk.
+Nice=10
+IOSchedulingClass=idle
+# DuckDB is capped at 256 MB (SET memory_limit) and spills to data_rollup/_tmp;
+# this is the safety net for the Python process around it.
+MemoryMax=512M
+
+# The first pass on an empty data_rollup/ rebuilds the whole history. Later
+# passes are incremental and normally finish in seconds.
+TimeoutStartSec=6h
+
+[Install]
+WantedBy=multi-user.target
