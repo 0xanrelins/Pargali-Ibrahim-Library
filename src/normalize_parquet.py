@@ -73,7 +73,7 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
 
     try:
         while not stop_requested:
-            stats = normalize_once()
+            stats = normalize_once(should_stop=lambda: stop_requested)
             log_stats(stats, label="Normalize batch complete")
 
             retention_stats = retention_scheduler.maybe_run_after_normalize()

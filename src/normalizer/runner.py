@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from datasets import POLYMARKET, REGISTERED_SOURCES, all_categories, iter_jsonl_paths, raw_root
@@ -51,7 +52,41 @@ def collect_backlog_metrics(
     return backlog
 
 
-def normalize_once() -> dict[str, int]:
+def _persist_processed_state(
+    *,
+    state_path: Path,
+    processed_files: set[str],
+    scanned_paths: set[str],
+    interrupted: bool,
+) -> None:
+    """Write processed state once per batch, bounded to raw files still on disk.
+
+    ``scanned_paths`` is every raw JSONL path seen during this batch. Entries that
+    were not seen belong to raw files deleted by retention (or to sources that are
+    no longer registered), so they are pruned and the state file stops growing.
+
+    When the batch stopped early the scan is partial: paths not visited yet are
+    not proof of deletion, so the state is written as-is and pruned on the next
+    full batch instead.
+    """
+    if interrupted:
+        save_processed_files(state_path, processed_files)
+        logger.info(
+            "Stop requested mid-batch; saved %d processed entries without pruning",
+            len(processed_files),
+        )
+        return
+
+    retained = processed_files & scanned_paths
+    save_processed_files(state_path, retained)
+    logger.info(
+        "Saved processed state: %d entries (%d pruned, raw file no longer on disk)",
+        len(retained),
+        len(processed_files) - len(retained),
+    )
+
+
+def normalize_once(*, should_stop: Callable[[], bool] | None = None) -> dict[str, int]:
     batch_started = time.monotonic()
     project_root, data_root, state_path, tokens_path = project_paths()
     processed_files = load_processed_files(state_path)
@@ -78,6 +113,8 @@ def normalize_once() -> dict[str, int]:
         "parquet_batches_written": 0,
     }
     written_paths: set[Path] = set()
+    scanned_paths: set[str] = set()
+    interrupted = False
 
     collect_backlog_metrics(project_root=project_root, state_path=state_path)
 
@@ -88,8 +125,13 @@ def normalize_once() -> dict[str, int]:
         exchange_raw_root = raw_root(project_root, source.exchange)
         for category in source.categories:
             for jsonl_path in iter_jsonl_paths(exchange_raw_root, category):
+                if should_stop is not None and should_stop():
+                    interrupted = True
+                    break
+
                 stats["raw_files_seen"] += 1
                 rel_path = relative_to_project(jsonl_path, project_root)
+                scanned_paths.add(rel_path)
 
                 if rel_path in processed_files:
                     stats["raw_files_skipped"] += 1
@@ -102,7 +144,6 @@ def normalize_once() -> dict[str, int]:
                 )
                 if out_path.exists():
                     processed_files.add(rel_path)
-                    save_processed_files(state_path, processed_files)
                     stats["raw_files_skipped"] += 1
                     logger.info(
                         "Recovered processed state for existing batch: %s",
@@ -137,14 +178,25 @@ def normalize_once() -> dict[str, int]:
                     continue
 
                 processed_files.add(rel_path)
-                save_processed_files(state_path, processed_files)
 
                 stats["raw_files_processed"] += 1
                 stats["rows_written"] += row_count
                 written_paths.add(written_path)
                 parquet_files_processed_total.inc()
 
+            if interrupted:
+                break
+        if interrupted:
+            break
+
     stats["parquet_batches_written"] = len(written_paths)
+
+    _persist_processed_state(
+        state_path=state_path,
+        processed_files=processed_files,
+        scanned_paths=scanned_paths,
+        interrupted=interrupted,
+    )
 
     collect_backlog_metrics(project_root=project_root, state_path=state_path)
 

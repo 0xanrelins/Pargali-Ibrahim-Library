@@ -79,7 +79,7 @@ Registry: `src/datasets.py` — add new sources/categories here first.
 
 **Project goal:** collect raw JSONL and write immutable normalized parquet batches — nothing else.
 
-Normalizer state lives in `state/processed.json` (which raw JSONL files were normalized). Parquet batches live under `data/`. By default raw JSONL is **not deleted**. Optional retention (feature-flagged) deletes eligible raw batches on an hourly schedule; see **Raw retention** below.
+Normalizer state lives in `state/processed.json` (which raw JSONL files were normalized). It is written **once per batch** (atomic tmp + `os.replace`), and each batch prunes entries whose raw JSONL no longer exists on disk, so the file stays proportional to `raw/`. Parquet batches live under `data/`. By default raw JSONL is **not deleted**. Optional retention (feature-flagged) deletes eligible raw batches on an hourly schedule; see **Raw retention** below.
 
 **Never run two processes on `:9101`** (old converter loop + normalizer loop).
 
