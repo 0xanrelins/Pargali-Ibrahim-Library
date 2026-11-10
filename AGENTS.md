@@ -93,25 +93,24 @@ Module: `src/normalizer/raw_retention.py`, triggered from `normalize_parquet.py 
 
 - No independent retention thread.
 - After each normalize batch, retention is attempted.
-- If backlog > 0, skip and **retry on the next normalize cycle** (~60s) — backlog skips do not start the interval throttle.
+- Backlog is collected and published as a gauge for observability only; it **never blocks** a run. Every file is gated individually.
 - After a full candidate evaluation (dry-run or live delete), wait `interval_sec` before evaluating again.
 
 **Delete only when all gates pass:**
 
 1. Matching batch parquet exists (`batch_parquet_path_from_jsonl`).
 2. Raw mtime older than grace period.
-3. Global backlog zero (`collect_backlog_metrics`, not Prometheus reads).
-4. Source/category has `has_parquet_pipeline=True` (Binance and Polymarket pipeline categories).
+3. Source/category has `has_parquet_pipeline=True` (Binance and Polymarket pipeline categories).
 
 `processed.json` is backlog signal only, not deletion proof. Retention applies to Polymarket the same as Binance once the matching batch parquet exists.
 
-**Metrics on `:9101`:** `mdp_raw_retention_would_delete_*` (dry-run), `mdp_raw_retention_files_deleted_total` / `mdp_raw_retention_bytes_freed_total` (live), skip gauges labeled by `reason/exchange/category`, backlog block gauges by `category`.
+**Metrics on `:9101`:** `mdp_raw_retention_would_delete_*` (dry-run), `mdp_raw_retention_files_deleted_total` / `mdp_raw_retention_bytes_freed_total` (live), skip gauges labeled by `reason/exchange/category`, informational backlog gauge `mdp_raw_retention_backlog_files` by `category` (never blocks deletion).
 
 **Operator rollout (manual restart required):**
 
 1. Enable dry-run:  
    `./venv/bin/python -u src/normalize_parquet.py --loop --raw-retention-enabled`
-2. Review logs/metrics for one hour (check skip breakdown and backlog block detail).
+2. Review logs/metrics for one hour (check skip breakdown and backlog gauge).
 3. Live delete: add `--no-raw-retention-dry-run` (operator restarts normalizer manually).
 
 Polymarket raw is included under the same gates after parquet exists. Unprocessed PM raw (including metadata used for token registry seed) remains until normalized.

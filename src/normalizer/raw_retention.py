@@ -1,4 +1,9 @@
-"""Conservative raw JSONL retention after immutable parquet batches exist."""
+"""Raw JSONL retention after immutable parquet batches exist.
+
+Backlog is reported for observability only; it never blocks a run. Each file is
+gated on its own: the matching parquet batch must exist and the file must be
+older than the grace period.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,7 @@ from typing import DefaultDict
 
 from datasets import REGISTERED_SOURCES, all_categories, iter_jsonl_paths, raw_root
 from metrics.pipeline_registry import (
-    raw_retention_backlog_blocked_files,
+    raw_retention_backlog_files,
     raw_retention_bytes_freed_total,
     raw_retention_files_deleted_total,
     raw_retention_last_run_timestamp,
@@ -30,7 +35,6 @@ DEFAULT_GRACE_HOURS = 1.0
 
 SKIP_REASON_NO_PARQUET = "no_parquet"
 SKIP_REASON_GRACE = "grace"
-SKIP_REASON_BACKLOG = "backlog"
 SKIP_REASON_THROTTLE = "throttle"
 
 SkipKey = tuple[str, str, str]
@@ -46,7 +50,6 @@ class RawRetentionConfig:
 
 @dataclass
 class RawRetentionStats:
-    run_skipped_backlog: int = 0
     run_skipped_throttle: int = 0
     would_delete: int = 0
     deleted: int = 0
@@ -60,7 +63,6 @@ class RawRetentionStats:
 
     def as_dict(self) -> dict[str, int]:
         return {
-            "run_skipped_backlog": self.run_skipped_backlog,
             "run_skipped_throttle": self.run_skipped_throttle,
             "would_delete": self.would_delete,
             "deleted": self.deleted,
@@ -111,10 +113,6 @@ class RawRetentionScheduler:
             dry_run=self.config.dry_run,
         )
 
-        if stats.get("run_skipped_backlog"):
-            logger.info("Raw retention skipped (backlog) — will retry after next normalize batch")
-            return stats
-
         self._last_evaluated_at = time.monotonic()
         if self.config.dry_run:
             logger.info(
@@ -162,24 +160,19 @@ def _reset_skip_gauges() -> None:
             exchange=exchange,
             category=category,
         ).set(0.0)
-    raw_retention_run_skipped.labels(reason=SKIP_REASON_BACKLOG).set(0.0)
     raw_retention_run_skipped.labels(reason=SKIP_REASON_THROTTLE).set(0.0)
     for category in all_categories():
-        raw_retention_backlog_blocked_files.labels(category=category).set(0.0)
+        raw_retention_backlog_files.labels(category=category).set(0.0)
 
 
 def publish_retention_metrics(stats: RawRetentionStats, *, dry_run: bool) -> None:
     raw_retention_last_run_timestamp.set(time.time())
     _reset_skip_gauges()
 
-    if stats.run_skipped_backlog:
-        raw_retention_run_skipped.labels(reason=SKIP_REASON_BACKLOG).set(1.0)
-        for category, count in stats.backlog_by_category.items():
-            if count > 0:
-                raw_retention_backlog_blocked_files.labels(category=category).set(float(count))
-        raw_retention_would_delete_files.set(0.0)
-        raw_retention_would_delete_bytes.set(0.0)
-        return
+    # Backlog is informational: publish it, but never let it suppress the
+    # would-delete/delete metrics below.
+    for category, count in stats.backlog_by_category.items():
+        raw_retention_backlog_files.labels(category=category).set(float(count))
 
     for (reason, exchange, category), count in stats.skip_by_source.items():
         if count > 0:
@@ -231,24 +224,25 @@ def run_raw_retention(
     grace_hours: float = DEFAULT_GRACE_HOURS,
     dry_run: bool = True,
 ) -> dict[str, int]:
-    """Delete eligible raw JSONL batches or report dry-run candidates."""
+    """Delete eligible raw JSONL batches or report dry-run candidates.
+
+    Backlog is collected for observability only and never stops deletion: files
+    are still gated individually on parquet existence and the grace period.
+    """
     stats = RawRetentionStats()
 
     backlog_by_category = collect_backlog_metrics(
         project_root=project_root,
         state_path=state_path,
     )
+    stats.backlog_by_category = dict(backlog_by_category)
     backlog_total = sum(backlog_by_category.values())
     if backlog_total > 0:
-        stats.run_skipped_backlog = 1
-        stats.backlog_by_category = dict(backlog_by_category)
         logger.info(
-            "Raw retention skipped — backlog_total=%s backlog_by_category=%s",
+            "Raw retention backlog=%s (informational, does not block deletion) backlog_by_category=%s",
             backlog_total,
             backlog_by_category,
         )
-        publish_retention_metrics(stats, dry_run=dry_run)
-        return stats.as_dict()
 
     cutoff_ts = time.time() - (grace_hours * 3600)
 

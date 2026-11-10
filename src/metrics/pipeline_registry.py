@@ -92,7 +92,7 @@ raw_retention_bytes_freed_total = Counter(
 
 raw_retention_run_skipped = Gauge(
     "mdp_raw_retention_run_skipped",
-    "1 when the last retention run was skipped entirely.",
+    "1 when the last retention attempt was skipped entirely (interval throttle).",
     ["reason"],
 )
 
@@ -102,8 +102,8 @@ raw_retention_skipped_files_last_run = Gauge(
     ["reason", "exchange", "category"],
 )
 
-raw_retention_backlog_blocked_files = Gauge(
-    "mdp_raw_retention_backlog_blocked_files",
-    "Unprocessed raw files that blocked the last retention run, by category.",
+raw_retention_backlog_files = Gauge(
+    "mdp_raw_retention_backlog_files",
+    "Unprocessed raw JSONL files seen by the last retention run, by category (informational; never blocks deletion).",
     ["category"],
 )
