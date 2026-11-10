@@ -122,6 +122,10 @@ cd "/path/to/Pargali-Ibrahim-Library"
 | Parse dry-run (no writes) | `./venv/bin/python src/parse_raw.py` |
 | One-shot normalize | `./venv/bin/python src/normalize_parquet.py --once` |
 | Normalizer loop | `./venv/bin/python -u src/normalize_parquet.py --loop` |
+| Rollup pass (timer) | `./venv/bin/python src/rollup_parquet.py --run` |
+| Rollup rebuild (all history) | `./venv/bin/python src/rollup_parquet.py --backfill` |
+| Rollup preview (no writes) | `./venv/bin/python src/rollup_parquet.py --run --dry-run` |
+| Rollup hourly retention | add `--hourly-days 7` (default), `D` for the window |
 | Metrics | `curl -s localhost:9100/metrics \| head` (also `:9101`, `:9102`, `:9103`) |
 | Recreate Grafana | `cd monitoring && docker compose up -d grafana --force-recreate` |
 | Stop monitoring | `cd monitoring && docker compose down` |
@@ -139,12 +143,14 @@ cd "/path/to/Pargali-Ibrahim-Library"
 │   ├── collect_polymarket.py / run_polymarket_...# Polymarket (:9103)
 │   ├── normalize_parquet.py                       # Normalizer CLI (:9101)
 │   ├── normalizer/                                # DuckDB batch writer
+│   ├── rollup_parquet.py                          # Derived hourly + daily rollups
 │   ├── convert_parquet.py                         # Deprecated → normalize_parquet
 │   ├── collectors/                                # Adapter layer
 │   ├── metrics/                                   # Prometheus registries
 │   ├── archive/tier2/                             # derived, catalog, agent (not run)
 ├── raw/                     # JSONL (gitignored)
-├── data/                    # Parquet (gitignored)
+├── data/                    # Parquet (gitignored, source of truth)
+├── data_rollup/             # Derived rollups (gitignored, regenerable)
 ├── monitoring/              # Docker Compose stack
 ├── infra/monitoring/grafana/dashboards/  # Dashboard JSON source of truth
 ├── README.md
@@ -178,6 +184,76 @@ cd "/path/to/Pargali-Ibrahim-Library"
 | `prediction_trades` | last_trade_price |
 
 **Dataset ID:** `{category}:{exchange}:{symbol}` — e.g. `trades:binance_futures:BTCUSDT`
+
+---
+
+## Rollup layer (`data_rollup/`, derived)
+
+`data/` stays the source of truth: one immutable batch per raw JSONL file means
+~1.4k parquet files per dataset per day, so a plain `count(*)` over one day
+opens ~1.4k footers. `src/rollup_parquet.py` writes a read-optimised copy on top:
+
+```
+data_rollup/hourly/{category}/{exchange}/{symbol}/{YYYY-MM-DD}/{HH}.parquet
+data_rollup/daily/{category}/{exchange}/{symbol}/{YYYY-MM-DD}.parquet
+```
+
+| Layer | Content | Retention |
+|-------|---------|-----------|
+| `hourly` | every batch of one **closed** hour, merged | last `--hourly-days` days (default 7) |
+| `daily` | the same day's hourly rollups, merged | all history, written once the day is closed |
+
+Rules:
+
+- **Closed only** — an hour is rolled up 5 minutes after it ends, a day after it
+  ends. The newest data is therefore at most ~10 min (timer) + 5 min behind `data/`.
+- **Incremental** — a target is written only when it is missing or older than its
+  newest source; a second pass writes nothing. `--backfill` ignores freshness and
+  rebuilds the whole layer.
+- **Atomic** — `tmp` file in the target directory + `os.replace`; a killed run
+  leaves the previous file intact. Output is `ZSTD` parquet.
+- **Same schema as `data/`** — columns are cast to the normalizer contract
+  (`src/normalizer/schemas.py`) in contract order. Rows keep the source batch
+  order (one-minute files, event order), so a rollup stays near time-ordered and
+  parquet statistics still prune time ranges — without paying for a sort pass.
+- **Derived, not history** — `data/`, `raw/` and `state/` are never written. Delete
+  `data_rollup/` and rebuild it at any time:
+
+```bash
+rm -rf data_rollup && ./venv/bin/python src/rollup_parquet.py --backfill
+```
+
+**Timer (operator):** `infra/systemd/pargali-rollup.service` + `.timer` run
+`--run` every 10 minutes. Install after merge, from the project root:
+
+```bash
+cp infra/systemd/pargali-rollup.service infra/systemd/pargali-rollup.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now pargali-rollup.timer
+journalctl -u pargali-rollup.service -n 20
+```
+
+Set the `ExecStart`/`WorkingDirectory` paths if the checkout is not at
+`/root/Pargali-Ibrahim-Library`. Point new dashboards/queries at `data_rollup/`:
+
+```bash
+./venv/bin/python -c "
+import duckdb
+print(duckdb.connect().execute('''
+  SELECT count(*) FROM read_parquet('data_rollup/daily/prediction_price/polymarket/BTC_15M/*.parquet')
+''').df())
+"
+```
+
+**Disk cost:** the daily layer is a recompressed copy of `data/` (ZSTD); the
+hourly layer adds the last `--hourly-days` days. Measured on the
+production dataset after the first backfill: `data/` 7.2 GB →
+
+| Path | Files | Size |
+|------|-------|------|
+| `data_rollup/daily/` | _pending measurement_ | _pending_ |
+| `data_rollup/hourly/` | _pending measurement_ | _pending_ |
+
+Treat it as cache: it costs disk, saves query time.
 
 ---
 
