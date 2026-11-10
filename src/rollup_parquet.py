@@ -91,7 +91,6 @@ class HourlyTask:
     hour: int
     target: Path
     sources: tuple[Path, ...]
-    newest_source_mtime: float
 
 
 @dataclass(frozen=True)
@@ -104,7 +103,6 @@ class DailyTask:
     day: date
     target: Path
     hourly_dir: Path
-    newest_source_mtime: float
 
 
 @dataclass
@@ -124,7 +122,8 @@ class RollupPlan:
         return {
             "hourly_to_write": len(self.hourly_tasks),
             "daily_to_write": len(self.daily_tasks),
-            "hourly_dirs_to_prune": len(self.prune_dirs),
+            # Plan-time preview: a pass can add transient day dirs it prunes again.
+            "hourly_dirs_pending_prune": len(self.prune_dirs),
             "hours_skipped_fresh": self.hours_skipped_fresh,
             "hours_skipped_open": self.hours_skipped_open,
             "days_skipped_fresh": self.days_skipped_fresh,
@@ -459,7 +458,6 @@ def _plan_group(
                 hour=hour,
                 target=target,
                 sources=tuple(batch.path for batch in batches),
-                newest_source_mtime=newest,
             )
         )
 
@@ -474,7 +472,6 @@ def _plan_group(
                 hourly_dir=hourly_rollup_path(
                     rollup_root, group.category, group.exchange, group.symbol, group.day, 0
                 ).parent,
-                newest_source_mtime=group.newest_mtime(),
             )
         )
 
