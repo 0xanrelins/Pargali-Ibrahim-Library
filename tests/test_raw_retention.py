@@ -11,6 +11,7 @@ from pathlib import Path
 
 from datasets import BINANCE_FUTURES, POLYMARKET, parquet_batch_path
 from metrics.pipeline_registry import (
+    raw_retention_backlog_files,
     raw_retention_bytes_freed_total,
     raw_retention_files_deleted_total,
     raw_retention_would_delete_bytes,
@@ -178,7 +179,7 @@ class RawRetentionTests(unittest.TestCase):
         self.assertEqual(stats["deleted"], 0)
         self.assertEqual(stats["skipped_grace"], 1)
 
-    def test_backlog_blocks_entire_run(self) -> None:
+    def test_backlog_does_not_block_eligible_deletes(self) -> None:
         jsonl, parquet = _binance_trade_paths(self.root, batch_stamp="12-00-00")
         pending, _pending_parquet = _binance_trade_paths(self.root, batch_stamp="12-01-00")
         _write_jsonl(jsonl, age_hours=48.0)
@@ -196,10 +197,38 @@ class RawRetentionTests(unittest.TestCase):
             dry_run=False,
         )
 
+        self.assertNotIn("run_skipped_backlog", stats)
+        self.assertFalse(jsonl.exists())
+        self.assertTrue(pending.exists())
+        self.assertEqual(stats["deleted"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(raw_retention_backlog_files.labels(category="trades")._value.get(), 1.0)
+
+    def test_dry_run_reports_candidates_while_backlog_present(self) -> None:
+        jsonl, parquet = _binance_trade_paths(self.root, batch_stamp="12-00-00")
+        pending, _pending_parquet = _binance_trade_paths(self.root, batch_stamp="12-01-00")
+        _write_jsonl(jsonl, age_hours=48.0)
+        _write_jsonl(pending, age_hours=48.0)
+        _write_parquet(parquet)
+        self.state_path.write_text(
+            json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
+            encoding="utf-8",
+        )
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=True,
+        )
+
         self.assertTrue(jsonl.exists())
         self.assertTrue(pending.exists())
-        self.assertEqual(stats["run_skipped_backlog"], 1)
+        self.assertEqual(stats["would_delete"], 1)
         self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(raw_retention_would_delete_files._value.get(), 1.0)
+        self.assertGreater(raw_retention_would_delete_bytes._value.get(), 0.0)
 
     def test_polymarket_live_delete_with_parquet_and_grace(self) -> None:
         jsonl, parquet = _polymarket_metadata_paths(self.root)
@@ -288,7 +317,7 @@ class RawRetentionTests(unittest.TestCase):
         self.assertEqual(stats["deleted"], 0)
         self.assertEqual(stats["skipped_grace"], 1)
 
-    def test_polymarket_backlog_blocks_delete(self) -> None:
+    def test_polymarket_backlog_does_not_block_eligible_delete(self) -> None:
         jsonl, parquet = _polymarket_metadata_paths(self.root, batch_stamp="12-00-00")
         pending, _ = _polymarket_metadata_paths(self.root, batch_stamp="12-01-00")
         _write_jsonl(jsonl, age_hours=48.0)
@@ -308,10 +337,14 @@ class RawRetentionTests(unittest.TestCase):
             dry_run=False,
         )
 
-        self.assertTrue(jsonl.exists())
+        self.assertFalse(jsonl.exists())
         self.assertTrue(pending.exists())
-        self.assertEqual(stats["run_skipped_backlog"], 1)
-        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["deleted"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(
+            raw_retention_backlog_files.labels(category="prediction_metadata")._value.get(),
+            1.0,
+        )
 
     def test_empty_raw_directories_removed_after_delete(self) -> None:
         jsonl, parquet = _binance_trade_paths(self.root)
@@ -362,7 +395,7 @@ class RawRetentionSchedulerTests(unittest.TestCase):
             state_path=self.state_path,
         )
 
-    def test_backlog_skip_retries_on_next_call_without_throttle(self) -> None:
+    def test_backlog_does_not_skip_and_full_run_starts_throttle(self) -> None:
         jsonl, parquet = _binance_trade_paths(self.root, batch_stamp="12-00-00")
         pending, _ = _binance_trade_paths(self.root, batch_stamp="12-01-00")
         _write_jsonl(jsonl, age_hours=48.0)
@@ -372,7 +405,7 @@ class RawRetentionSchedulerTests(unittest.TestCase):
             json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
             encoding="utf-8",
         )
-        scheduler = self._scheduler(interval_sec=DEFAULT_RETENTION_INTERVAL_SEC)
+        scheduler = self._scheduler(interval_sec=DEFAULT_RETENTION_INTERVAL_SEC, dry_run=False)
 
         first = scheduler.maybe_run_after_normalize()
         second = scheduler.maybe_run_after_normalize()
@@ -380,28 +413,32 @@ class RawRetentionSchedulerTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
         assert first is not None and second is not None
-        self.assertEqual(first["run_skipped_backlog"], 1)
-        self.assertEqual(second["run_skipped_backlog"], 1)
-        self.assertEqual(second.get("run_skipped_throttle", 0), 0)
+        self.assertNotIn("run_skipped_backlog", first)
+        self.assertEqual(first["deleted"], 1)
+        self.assertFalse(jsonl.exists())
+        self.assertTrue(pending.exists())
+        self.assertEqual(second.get("run_skipped_throttle"), 1)
 
-    def test_backlog_clear_runs_retention_on_next_call(self) -> None:
+    def test_backlog_file_deleted_once_its_parquet_exists(self) -> None:
         jsonl, parquet = _binance_trade_paths(self.root, batch_stamp="12-00-00")
         pending, pending_parquet = _binance_trade_paths(self.root, batch_stamp="12-01-00")
         _write_jsonl(jsonl, age_hours=48.0)
         _write_jsonl(pending, age_hours=48.0)
         _write_parquet(parquet)
-        _write_parquet(pending_parquet)
         self.state_path.write_text(
             json.dumps({"processed_files": [f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"]}),
             encoding="utf-8",
         )
-        scheduler = self._scheduler(dry_run=False)
+        scheduler = self._scheduler(interval_sec=0.0, dry_run=False)
 
-        blocked = scheduler.maybe_run_after_normalize()
-        self.assertIsNotNone(blocked)
-        assert blocked is not None
-        self.assertEqual(blocked["run_skipped_backlog"], 1)
+        first = scheduler.maybe_run_after_normalize()
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(first["deleted"], 1)
+        self.assertFalse(jsonl.exists())
+        self.assertTrue(pending.exists())
 
+        _write_parquet(pending_parquet)
         self.state_path.write_text(
             json.dumps(
                 {
@@ -414,12 +451,10 @@ class RawRetentionSchedulerTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        cleared = scheduler.maybe_run_after_normalize()
-        self.assertIsNotNone(cleared)
-        assert cleared is not None
-        self.assertEqual(cleared.get("run_skipped_backlog", 0), 0)
-        self.assertGreaterEqual(cleared["deleted"], 1)
-        self.assertFalse(jsonl.exists())
+        second = scheduler.maybe_run_after_normalize()
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(second["deleted"], 1)
         self.assertFalse(pending.exists())
 
     def test_evaluated_run_throttled_until_interval_elapses(self) -> None:
@@ -438,7 +473,7 @@ class RawRetentionSchedulerTests(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNotNone(second)
         assert first is not None and second is not None
-        self.assertEqual(first.get("run_skipped_backlog", 0), 0)
+        self.assertNotIn("run_skipped_backlog", first)
         self.assertEqual(first["would_delete"], 1)
         self.assertEqual(second.get("run_skipped_throttle"), 1)
 
