@@ -49,6 +49,7 @@ DEFAULT_THREADS = 2
 ROLLUP_MEMORY_LIMIT = "256MB"
 PARQUET_COMPRESSION = "ZSTD"
 TEMP_DIR_NAME = "_tmp"
+PROGRESS_EVERY_FILES = 200
 
 UTC = timezone.utc
 BATCH_STAMP_PATTERN = re.compile(r"^(?P<hour>\d{2})-(?P<minute>\d{2})-(?P<second>\d{2})$")
@@ -734,6 +735,14 @@ def run_rollup(
             stats.hourly_written += 1
             stats.hourly_rows += rows
             stats.hourly_bytes += size
+            if stats.hourly_written % PROGRESS_EVERY_FILES == 0:
+                logger.info(
+                    "hourly progress: %d/%d written, %d failed, %.1f MB",
+                    stats.hourly_written,
+                    len(plan.hourly_tasks),
+                    stats.hourly_failed,
+                    stats.hourly_bytes / 1_000_000,
+                )
         for task in plan.daily_tasks:
             try:
                 result = builder.build_daily(task)
@@ -748,6 +757,12 @@ def run_rollup(
             stats.daily_written += 1
             stats.daily_rows += rows
             stats.daily_bytes += size
+            logger.info(
+                "daily written: %s (%d rows, %.1f MB)",
+                task.target,
+                rows,
+                size / 1_000_000,
+            )
     finally:
         builder.close()
 
