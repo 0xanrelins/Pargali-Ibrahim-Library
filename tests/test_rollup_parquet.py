@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -494,6 +495,26 @@ class HourlyDaysPolicyTest(RollupTestBase):
     def test_hourly_days_must_be_positive(self) -> None:
         with self.assertRaises(ValueError):
             self.run_pass(hourly_days=0)
+
+
+class TempFileCleanupTest(RollupTestBase):
+    def test_stale_temp_files_are_removed_but_live_ones_are_kept(self) -> None:
+        self.write_batch(DAY, "09-00-10", _trade_rows(1_762_000_000_000, 1))
+        day_dir = self.hourly(DAY, 9).parent
+        day_dir.mkdir(parents=True, exist_ok=True)
+        stale = day_dir / ".09.999999.tmp"
+        stale.write_bytes(b"half written")
+        old = time.time() - 7200
+        os.utime(stale, (old, old))
+        live = day_dir / ".09.123456.tmp"
+        live.write_bytes(b"in flight")
+
+        stats = self.run_pass()
+
+        self.assertFalse(stale.exists(), "a leftover temp file must be cleaned up")
+        self.assertTrue(live.exists(), "a recent temp file may belong to a live pass")
+        self.assertEqual(stats.temp_files_cleaned, 1)
+        self.assertTrue(self.hourly(DAY, 9).exists())
 
 
 class PruneSafetyTest(RollupTestBase):

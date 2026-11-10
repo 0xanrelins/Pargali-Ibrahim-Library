@@ -49,6 +49,8 @@ DEFAULT_THREADS = 2
 ROLLUP_MEMORY_LIMIT = "256MB"
 PARQUET_COMPRESSION = "ZSTD"
 TEMP_DIR_NAME = "_tmp"
+TEMP_FILE_SUFFIX = ".tmp"
+STALE_TEMP_MAX_AGE_SEC = 3600
 PROGRESS_EVERY_FILES = 200
 
 UTC = timezone.utc
@@ -144,6 +146,7 @@ class RollupStats:
     daily_bytes: int = 0
     daily_skipped_empty: int = 0
     hourly_dirs_pruned: int = 0
+    temp_files_cleaned: int = 0
     hours_skipped_fresh: int = 0
     hours_skipped_open: int = 0
     days_skipped_fresh: int = 0
@@ -162,6 +165,7 @@ class RollupStats:
             "daily_bytes": self.daily_bytes,
             "daily_skipped_empty": self.daily_skipped_empty,
             "hourly_dirs_pruned": self.hourly_dirs_pruned,
+            "temp_files_cleaned": self.temp_files_cleaned,
             "hours_skipped_fresh": self.hours_skipped_fresh,
             "hours_skipped_open": self.hours_skipped_open,
             "days_skipped_fresh": self.days_skipped_fresh,
@@ -475,6 +479,33 @@ def _plan_group(
         )
 
 
+def cleanup_stale_temp_files(
+    rollup_root: Path,
+    *,
+    max_age_seconds: float = STALE_TEMP_MAX_AGE_SEC,
+    now: float | None = None,
+) -> int:
+    """Remove ``.<name>.<pid>.tmp`` files left behind by a killed pass.
+
+    Only hidden ``.tmp`` files are considered (DuckDB's own scratch files under
+    ``_tmp/`` are not hidden) and only ones older than ``max_age_seconds``, so a
+    concurrent pass keeps its in-flight temp file.
+    """
+    if not rollup_root.is_dir():
+        return 0
+    cutoff = (now if now is not None else time.time()) - max_age_seconds
+    removed = 0
+    for path in rollup_root.rglob(f".*{TEMP_FILE_SUFFIX}"):
+        try:
+            if not path.is_file() or path.stat().st_mtime >= cutoff:
+                continue
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        removed += 1
+    return removed
+
+
 def prune_hourly(
     rollup_root: Path,
     *,
@@ -722,6 +753,13 @@ def run_rollup(
             logger.debug("would prune %s", directory)
         stats.duration_seconds = round(time.monotonic() - started, 3)
         return stats
+
+    stats.temp_files_cleaned = cleanup_stale_temp_files(Path(rollup_root))
+    if stats.temp_files_cleaned:
+        logger.info(
+            "Removed %d stale temp file(s) from an interrupted pass",
+            stats.temp_files_cleaned,
+        )
 
     builder = RollupBuilder(rollup_root=Path(rollup_root), threads=threads)
     try:
