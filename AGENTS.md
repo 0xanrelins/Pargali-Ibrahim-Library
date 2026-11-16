@@ -9,7 +9,7 @@ Guidance for AI coding agents working in this repository.
 **BTC Collector Pipeline** — self-hosted, single-node, BTC-only.
 
 ```
-Collector → raw JSONL → DuckDB Normalizer → immutable parquet batches
+Collector → raw JSONL → Normalizer (Arrow/parquet) → immutable parquet batches
 ```
 
 Data sources:
@@ -36,7 +36,7 @@ Optional future tiers (derived, knowledge, agent) are under `archive/tier2/` —
 | `src/run_polymarket_collector.py` | Wrapper + `:9103` metrics |
 | `src/parse_raw.py` / `src/parse_polymarket.py` | JSONL → row dicts |
 | `src/normalize_parquet.py` | Normalizer CLI (`--once` / `--loop`) on `:9101` |
-| `src/normalizer/` | DuckDB writer, schemas, paths, runner (1 JSONL → 1 parquet) |
+| `src/normalizer/` | Arrow parquet writer, schemas, paths, runner (1 JSONL → 1 parquet) |
 | `src/rollup_parquet.py` | Derived rollup layer (`data_rollup/`, hourly + daily) — read-only on `data/` |
 | `src/convert_parquet.py` | **Deprecated** — delegates to `normalize_parquet.py` |
 | `archive/tier2/` | Derived, knowledge, agent, catalog, coverage, quality (not runtime) |

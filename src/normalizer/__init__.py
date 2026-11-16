@@ -1,4 +1,4 @@
-"""DuckDB normalizer: raw JSONL → immutable parquet batches."""
+"""Normalizer: raw JSONL → immutable parquet batches."""
 
 from normalizer.batch import normalize_jsonl_batch
 from normalizer.parser import parse_jsonl_file

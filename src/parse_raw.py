@@ -12,6 +12,7 @@ from datasets import (
     BinanceCategory,
     iter_jsonl_paths as dataset_iter_jsonl_paths,
 )
+from json_codec import loads as json_loads
 from unicorn_fy import UnicornFy
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ EXCHANGE = BINANCE_FUTURES
 
 
 def unwrap_payload(raw_line: str) -> dict[str, object]:
-    payload = json.loads(raw_line)
+    payload = json_loads(raw_line)
     if not isinstance(payload, dict):
         raise ValueError("JSON root must be an object")
 

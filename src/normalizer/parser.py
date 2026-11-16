@@ -23,21 +23,24 @@ def parse_jsonl_file(
     parser = parse_polymarket_lines if exchange == POLYMARKET else parse_raw_lines
     rows: list[ParsedRow] = []
 
-    for raw_line in jsonl_path.read_text(encoding="utf-8").splitlines():
-        if exchange == POLYMARKET:
-            parsed = parser(raw_line, token_registry=token_registry)
-        else:
-            parsed = parser(raw_line)
+    # Stream the raw file instead of materializing a full ``read_text()`` copy
+    # plus a ``splitlines()`` list: batches are read once, top to bottom.
+    with jsonl_path.open("r", encoding="utf-8") as jsonl_file:
+        for raw_line in jsonl_file:
+            if exchange == POLYMARKET:
+                parsed = parser(raw_line, token_registry=token_registry)
+            else:
+                parsed = parser(raw_line)
 
-        for row_category, row in parsed:
-            if row_category != category:
-                logger.warning(
-                    "Skipping row category %s in %s (expected %s)",
-                    row_category,
-                    jsonl_path,
-                    category,
-                )
-                continue
-            rows.append(row)
+            for row_category, row in parsed:
+                if row_category != category:
+                    logger.warning(
+                        "Skipping row category %s in %s (expected %s)",
+                        row_category,
+                        jsonl_path,
+                        category,
+                    )
+                    continue
+                rows.append(row)
 
     return rows
