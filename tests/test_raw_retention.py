@@ -24,6 +24,7 @@ from normalizer.raw_retention import (
     RawRetentionScheduler,
     run_raw_retention,
 )
+from normalizer.state import load_processed_state, save_processed_state
 
 
 def _write_jsonl(path: Path, *, age_hours: float = 48.0) -> None:
@@ -370,6 +371,106 @@ class RawRetentionTests(unittest.TestCase):
         self.assertEqual(config.grace_hours, 1.0)
         self.assertEqual(config.interval_sec, 3_600.0)
 
+
+class MappedRetentionTests(unittest.TestCase):
+    """Retention trusts the recorded batch mapping, not a derived path."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+        self.data_root = self.root / "data"
+        self.state_path = self.root / "state" / "processed.json"
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.jsonl = (
+            self.root
+            / "raw"
+            / BINANCE_FUTURES
+            / "trades"
+            / "2026-08-14"
+            / "12-00-00.jsonl"
+        )
+        _write_jsonl(self.jsonl, age_hours=48.0)
+        self.raw_rel = f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def _merged_parquet(self, name: str = "12-00-00--12-05-00.parquet") -> Path:
+        path = (
+            self.root
+            / "data"
+            / "trades"
+            / BINANCE_FUTURES
+            / "BTCUSDT"
+            / "2026-08-14"
+            / name
+        )
+        _write_parquet(path)
+        return path
+
+    def _save_state(self, batches: dict[str, str], processed: set[str] | None = None) -> None:
+        save_processed_state(
+            self.state_path,
+            processed if processed is not None else set(batches),
+            batches,
+        )
+
+    def test_recorded_merged_batch_allows_delete(self) -> None:
+        merged = self._merged_parquet()
+        self._save_state({self.raw_rel: merged.relative_to(self.root).as_posix()})
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
+        self.assertFalse(self.jsonl.exists())
+        self.assertEqual(stats["deleted"], 1)
+        self.assertEqual(stats["skipped_no_mapping"], 0)
+
+    def test_merged_batch_without_mapping_blocks_delete(self) -> None:
+        self._merged_parquet()
+        # Legacy-style state: raw is marked processed, but no batch mapping exists.
+        self._save_state({}, processed={self.raw_rel})
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
+        self.assertTrue(self.jsonl.exists())
+        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["skipped_no_parquet"], 1)
+
+    def test_mapping_to_missing_batch_blocks_delete(self) -> None:
+        self._save_state({self.raw_rel: "data/trades/binance_futures/BTCUSDT/2026-08-14/missing.parquet"})
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
+        self.assertTrue(self.jsonl.exists())
+        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["skipped_no_parquet"], 1)
+
+    def test_malformed_raw_path_has_no_recorded_batch(self) -> None:
+        from normalizer.raw_retention import _recorded_batch_rel
+
+        self.assertIsNone(
+            _recorded_batch_rel(
+                rel_path="legacy/flat.jsonl",
+                batches={},
+                project_root=self.root,
+                data_root=self.data_root,
+            )
+        )
 
 class RawRetentionSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
