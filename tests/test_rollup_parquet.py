@@ -28,6 +28,8 @@ from normalizer.schemas import category_column_specs
 from normalizer.writer import close_batch_writer, write_parquet_batch
 from rollup_parquet import (
     DAILY_LAYER,
+    DiscoveryCounters,
+    DiscoveryPolicy,
     HOURLY_LAYER,
     TEMP_DIR_NAME,
     build_plan,
@@ -37,6 +39,7 @@ from rollup_parquet import (
     hour_is_closed,
     hourly_rollup_path,
     hours_covered,
+    main,
     prune_hourly,
     run_rollup,
     scan_day_batches,
@@ -153,6 +156,13 @@ class RollupTestBase(unittest.TestCase):
         """Write a valid batch under an arbitrary (e.g. merged) file name."""
         path = self.day_dir(day, category=category) / name
         write_parquet_batch(path, rows, category)
+        return path
+
+    def write_empty_batch(self, day: date, stamp: str, *, category: str = TRADES) -> Path:
+        """A valid parquet file with the contract schema and zero rows."""
+        path = self.day_dir(day, category=category) / f"{stamp}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_parquet_batch(path, [], category)
         return path
 
     def reference_rows(self, *glob: str) -> list[tuple[object, ...]]:
@@ -654,7 +664,7 @@ class LayoutEquivalenceTest(RollupTestBase):
 
 
 class BrokenSourceTest(RollupTestBase):
-    def test_batch_without_a_timestamp_column_is_reported_and_skipped(self) -> None:
+    def test_batch_without_a_timestamp_column_blocks_the_day(self) -> None:
         self.write_batch(DAY, "09-00-10", _trade_rows(ts(DAY, 9, 0, 10), 2))
         broken = self.day_dir() / "09-30-00.parquet"
         pq.write_table(pa.table({"price": [1.0], "symbol": ["BTCUSDT"]}), broken)
@@ -663,14 +673,19 @@ class BrokenSourceTest(RollupTestBase):
             stats = self.run_pass()
 
         self.assertEqual(stats.sources_skipped, 1)
+        self.assertEqual(stats.failed, 1)
+        self.assertEqual(stats.days_blocked, 1)
         self.assertTrue(
             any("without a 'timestamp' column" in message for message in logs.output),
             logs.output,
         )
-        self.assertEqual(self.count(self.hourly(DAY, 9)), 2)
-        self.assertEqual(self.count(self.daily(DAY)), 2)
+        self.assertFalse(
+            self.hourly(DAY, 9).exists(),
+            "a day with a rejected source must not publish a partial hourly file",
+        )
+        self.assertFalse(self.daily(DAY).exists())
 
-    def test_unreadable_batch_is_skipped_and_the_previous_target_survives(self) -> None:
+    def test_unreadable_batch_fails_the_pass_and_previous_targets_survive(self) -> None:
         self.write_batch(DAY, "09-00-10", _trade_rows(ts(DAY, 9, 0, 10), 2))
         self.run_pass()
         target = self.hourly(DAY, 9)
@@ -684,7 +699,10 @@ class BrokenSourceTest(RollupTestBase):
             stats = self.run_pass()
 
         self.assertEqual(stats.sources_skipped, 1)
+        self.assertEqual(stats.failed, 1)
+        self.assertEqual(stats.days_blocked, 1)
         self.assertEqual(stats.hourly_failed, 0)
+        self.assertEqual(stats.hourly_written, 0)
         self.assertTrue(any("unreadable parquet" in message for message in logs.output))
         self.assertEqual(self.count(target), before, "the old hourly file must survive")
         self.assert_no_temp_files(target.parent)
@@ -698,6 +716,8 @@ class BrokenSourceTest(RollupTestBase):
             stats = self.run_pass()
 
         self.assertEqual(stats.sources_skipped, 1)
+        self.assertEqual(stats.failed, 1)
+        self.assertEqual(stats.days_blocked, 0)
         self.assertEqual(stats.hourly_failed, 0)
         self.assertEqual(stats.daily_skipped_empty, 0)
         self.assertFalse(self.daily(DAY).exists(), "no source must not create an empty daily")
@@ -711,8 +731,244 @@ class BrokenSourceTest(RollupTestBase):
             stats = self.run_pass()
 
         self.assertEqual(stats.sources_skipped, 1)
+        self.assertEqual(stats.failed, 1)
         self.assertTrue(any("implausible" in message for message in logs.output))
         self.assertFalse(self.hourly(DAY, 9).exists())
+
+    def test_span_over_two_days_is_rejected_and_fails_the_pass(self) -> None:
+        rows = [
+            _trade_row(ts(DAY, 0, 0), 0),
+            _trade_row(ts(DAY + timedelta(days=3), 0, 0), 1),
+        ]
+        self.write_batch(DAY, "00-00-00", rows)
+
+        with self.assertLogs("rollup_parquet", level="WARNING") as logs:
+            stats = self.run_pass()
+
+        self.assertEqual(stats.sources_skipped, 1)
+        self.assertEqual(stats.failed, 1)
+        self.assertTrue(
+            any("exceeds 2 days" in message for message in logs.output), logs.output
+        )
+        self.assertFalse(self.rollup_root.exists())
+
+    def test_main_exits_non_zero_when_a_source_is_rejected(self) -> None:
+        self.write_batch(DAY, "09-00-10", _trade_rows(ts(DAY, 9, 0, 10), 2))
+        corrupt = self.write_batch(DAY, "09-30-00", _trade_rows(ts(DAY, 9, 30), 1, first_id=9))
+        corrupt.write_bytes(b"this is not a parquet file")
+
+        with self.assertLogs("rollup_parquet", level="WARNING"):
+            code = main(
+                [
+                    "--run",
+                    "--data-root",
+                    str(self.data_root),
+                    "--rollup-root",
+                    str(self.rollup_root),
+                ]
+            )
+
+        self.assertEqual(code, 1)
+        self.assertFalse(self.daily(DAY).exists())
+
+        corrupt.unlink()
+        with self.assertLogs("rollup_parquet", level="INFO"):
+            clean = main(
+                [
+                    "--run",
+                    "--data-root",
+                    str(self.data_root),
+                    "--rollup-root",
+                    str(self.rollup_root),
+                ]
+            )
+        self.assertEqual(clean, 0)
+        self.assertTrue(self.daily(DAY).exists())
+
+
+class RejectedBatchKeepsTheDayTest(RollupTestBase):
+    def test_rejected_source_keeps_the_existing_daily_untouched(self) -> None:
+        self.write_batch(DAY, "09-00-10", _trade_rows(ts(DAY, 9, 0, 10), 2))
+        self.run_pass()
+        daily_before = self.snapshot(self.rollup_root)
+        hourly_mtime = self.hourly(DAY, 9).stat().st_mtime_ns
+
+        broken = self.write_batch(DAY, "09-30-00", _trade_rows(ts(DAY, 9, 30), 1, first_id=9))
+        broken.write_bytes(b"this is not a parquet file")
+
+        with self.assertLogs("rollup_parquet", level="WARNING"):
+            stats = self.run_pass()
+
+        self.assertEqual(stats.sources_skipped, 1)
+        self.assertEqual(stats.failed, 1)
+        self.assertEqual(stats.days_blocked, 1)
+        self.assertEqual(stats.daily_written, 0)
+        self.assertEqual(stats.hourly_written, 0)
+        self.assertEqual(
+            self.snapshot(self.rollup_root), daily_before, "a blocked day must not be rewritten"
+        )
+        self.assertEqual(self.hourly(DAY, 9).stat().st_mtime_ns, hourly_mtime)
+
+    def test_good_and_rejected_sources_in_one_day_write_no_partial_daily(self) -> None:
+        self.write_batch(DAY, "09-00-10", _trade_rows(ts(DAY, 9, 0, 10), 2))
+        broken = self.day_dir() / "09-30-00.parquet"
+        pq.write_table(pa.table({"price": [1.0], "symbol": ["BTCUSDT"]}), broken)
+
+        with self.assertLogs("rollup_parquet", level="WARNING"):
+            stats = self.run_pass()
+
+        self.assertEqual(stats.days_blocked, 1)
+        self.assertFalse(self.daily(DAY).exists())
+        self.assertFalse(self.hourly(DAY, 9).exists())
+
+
+class EmptySourceTest(RollupTestBase):
+    def test_empty_batch_is_counted_but_not_skipped(self) -> None:
+        self.write_batch(DAY, "09-00-10", _trade_rows(ts(DAY, 9, 0, 10), 2))
+        self.write_empty_batch(DAY, "09-30-00")
+
+        with self.assertLogs("rollup_parquet", level="DEBUG") as logs:
+            stats = self.run_pass()
+
+        self.assertEqual(stats.sources_empty, 1)
+        self.assertEqual(stats.sources_skipped, 0)
+        self.assertEqual(stats.failed, 0)
+        self.assertEqual(stats.days_blocked, 0)
+        self.assertEqual(self.count(self.daily(DAY)), 2)
+        self.assertFalse(
+            [message for message in logs.output if message.startswith("WARNING")],
+            logs.output,
+        )
+
+    def test_day_with_only_an_empty_batch_writes_nothing(self) -> None:
+        self.write_empty_batch(DAY, "09-00-10")
+
+        stats = self.run_pass()
+
+        self.assertEqual(stats.sources_empty, 1)
+        self.assertEqual(stats.sources_skipped, 0)
+        self.assertEqual(stats.failed, 0)
+        self.assertFalse(self.rollup_root.exists())
+
+
+class EmptyHourTest(RollupTestBase):
+    def _sparse_merged_day(self) -> Path:
+        return self.write_named_batch(
+            DAY,
+            "09-10-00--12-10-00.parquet",
+            _trade_rows(ts(DAY, 9, 10), 1) + _trade_rows(ts(DAY, 12, 10), 1, first_id=1),
+        )
+
+    def test_sparse_span_writes_no_empty_hourly_files(self) -> None:
+        self._sparse_merged_day()
+
+        stats = self.run_pass()
+
+        self.assertEqual(stats.hourly_written, 2)
+        self.assertEqual(stats.hourly_empty_skipped, 2)
+        self.assertEqual(
+            sorted(path.name for path in self.hourly(DAY, 9).parent.iterdir()),
+            ["09.parquet", "12.parquet"],
+        )
+        self.assertFalse(self.hourly(DAY, 10).exists())
+        self.assertFalse(self.hourly(DAY, 11).exists())
+        self.assertEqual(self.count(self.daily(DAY)), 2)
+        self.assert_no_temp_files(self.hourly(DAY, 9).parent)
+
+    def test_second_pass_does_not_rewrite_the_daily_for_empty_hours(self) -> None:
+        self._sparse_merged_day()
+        self.run_pass()
+        before = self.snapshot(self.rollup_root)
+
+        stats = self.run_pass()
+
+        self.assertEqual(stats.hourly_written, 0)
+        self.assertEqual(stats.hourly_empty_skipped, 2)
+        self.assertEqual(stats.daily_written, 0)
+        self.assertEqual(stats.daily_skipped_unchanged, 1)
+        self.assertEqual(self.snapshot(self.rollup_root), before)
+
+
+class DiscoveryGateTest(RollupTestBase):
+    def _policy(self, window_start: date = DAY, *, backfill: bool = False) -> DiscoveryPolicy:
+        return DiscoveryPolicy(
+            rollup_root=self.rollup_root,
+            window_start=window_start,
+            backfill=backfill,
+        )
+
+    def test_only_window_days_and_missing_dailies_are_scanned(self) -> None:
+        self.write_batch(OLD_DAY, "09-00-10", _trade_rows(ts(OLD_DAY, 9, 0, 10), 1))
+        self.write_batch(DAY, "09-00-10", _trade_rows(ts(DAY, 9, 0, 10), 1))
+        self.run_pass(hourly_days=1)
+        self.assertTrue(self.daily(OLD_DAY).exists())
+        self.assertTrue(self.daily(DAY).exists())
+
+        counters = DiscoveryCounters()
+        groups = discover_day_groups(
+            self.data_root, policy=self._policy(), counters=counters
+        )
+
+        self.assertEqual([group.day for group in groups], [DAY])
+        self.assertEqual(counters.days_scanned, 1)
+        self.assertEqual(counters.days_gated_out, 1)
+        self.assertEqual(counters.sources_scanned, 1)
+
+    def test_missing_daily_outside_the_window_forces_a_scan(self) -> None:
+        self.write_batch(OLD_DAY, "09-00-10", _trade_rows(ts(OLD_DAY, 9, 0, 10), 1))
+
+        counters = DiscoveryCounters()
+        groups = discover_day_groups(
+            self.data_root, policy=self._policy(), counters=counters
+        )
+
+        self.assertEqual([group.day for group in groups], [OLD_DAY])
+        self.assertEqual(counters.days_scanned, 1)
+        self.assertEqual(counters.days_gated_out, 0)
+
+    def test_late_batch_outside_the_window_invalidates_the_daily(self) -> None:
+        self.write_batch(OLD_DAY, "09-00-10", _trade_rows(ts(OLD_DAY, 9, 0, 10), 2))
+        self.run_pass(hourly_days=1)
+        self.assertEqual(self.count(self.daily(OLD_DAY)), 2)
+
+        late = self.write_batch(OLD_DAY, "10-30-00", _trade_rows(ts(OLD_DAY, 10, 30), 2, first_id=2))
+        self.mark_stale([self.daily(OLD_DAY)], [late])
+
+        counters = DiscoveryCounters()
+        groups = discover_day_groups(
+            self.data_root, policy=self._policy(), counters=counters
+        )
+        self.assertEqual([group.day for group in groups], [OLD_DAY])
+        self.assertEqual(counters.days_scanned, 1)
+
+        stats = self.run_pass(hourly_days=1)
+
+        self.assertEqual(stats.daily_written, 1)
+        self.assertEqual(self.count(self.daily(OLD_DAY)), 4)
+
+    def test_backfill_scans_days_outside_the_window(self) -> None:
+        self.write_batch(OLD_DAY, "09-00-10", _trade_rows(ts(OLD_DAY, 9, 0, 10), 1))
+        self.run_pass(hourly_days=1)
+
+        counters = DiscoveryCounters()
+        groups = discover_day_groups(
+            self.data_root, policy=self._policy(backfill=True), counters=counters
+        )
+
+        self.assertEqual([group.day for group in groups], [OLD_DAY])
+        self.assertEqual(counters.days_gated_out, 0)
+
+    def test_unchanged_tree_is_gated_out_on_the_second_pass(self) -> None:
+        self.write_batch(OLD_DAY, "09-00-10", _trade_rows(ts(OLD_DAY, 9, 0, 10), 1))
+        self.run_pass(hourly_days=1)
+
+        stats = self.run_pass(hourly_days=1)
+
+        self.assertEqual(stats.days_scanned, 0)
+        self.assertEqual(stats.days_gated_out, 1)
+        self.assertEqual(stats.hourly_written, 0)
+        self.assertEqual(stats.daily_written, 0)
+        self.assertEqual(stats.failed, 0)
 
 
 class HourlyDaysPolicyTest(RollupTestBase):

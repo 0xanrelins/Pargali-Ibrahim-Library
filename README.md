@@ -191,9 +191,10 @@ cd "/path/to/Pargali-Ibrahim-Library"
 
 `data/` stays the source of truth: one immutable batch per raw JSONL file means
 ~1.4k parquet files per dataset per day, so a plain `count(*)` over one day
-opens ~1.4k footers. With `NORMALIZE_BATCH_MODE=merged` a turn publishes
-`{first}--{last}.parquet` instead, so one file can span several hours.
-`src/rollup_parquet.py` writes a read-optimised copy on top:
+opens ~1.4k footers. Once the normalizer merged-batch change (PR #10) is merged,
+`NORMALIZE_BATCH_MODE=merged` lets a turn publish `{first}--{last}.parquet`
+instead, so one file can span several hours; this rollup already reads both
+layouts. `src/rollup_parquet.py` writes a read-optimised copy on top:
 
 ```
 data_rollup/hourly/{category}/{exchange}/{symbol}/{YYYY-MM-DD}/{HH}.parquet
@@ -226,9 +227,22 @@ Rules:
   (`src/normalizer/schemas.py`) in contract order. Rows keep the source file
   order (batches are near event-ordered), so a rollup stays near time-ordered and
   parquet statistics still prune time ranges — without paying for a sort pass.
-- **Skipped loudly** — a batch that cannot be bucketed (unreadable parquet,
-  missing/non-integer timestamp column, implausible epoch) is logged as a warning
-  and skipped; the rest of the hour still rolls up and `sources_skipped` counts it.
+- **Bounded discovery** — a pass reads parquet footers only for day directories
+  inside the `--hourly-days` window and for days whose daily file is missing or
+  older than its day directory (the normalizer publishes batches with an atomic
+  rename, so a new or replaced batch bumps the directory mtime). The rest of
+  `data/` is not opened, so discovery does not grow with the full history.
+- **Empty vs rejected** — a zero-row batch is normal (a quiet flush interval): it
+  is counted as `sources_empty` and ignored. A **non-empty** batch that cannot be
+  bucketed (unreadable parquet, missing/non-integer timestamp column, implausible
+  epoch, or a span over **two days**) counts as `sources_skipped`; the pass logs
+  one summary line with the reasons and exits non-zero. A single batch may span
+  at most two days, so normalizer merged mode must never produce a longer one.
+- **No partial day** — if any source of a day is rejected, that day's hourly and
+  daily files are neither written nor rewritten (an existing file stays exactly
+  as it is). That keeps `daily` equal to every row of the day instead of silently
+  publishing an incomplete file. Fix or remove the batch; the next pass fills the
+  day in.
 - **Derived, not history** — `data/`, `raw/` and `state/` are never written. Delete
   `data_rollup/` and rebuild it at any time:
 
