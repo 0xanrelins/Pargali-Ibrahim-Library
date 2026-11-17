@@ -21,7 +21,7 @@ raw/          JSONL batches (kept permanently)
     ↓
 Normalizer (:9101)   Arrow/parquet writer
     ↓
-data/         immutable parquet batches (1 JSONL → 1 parquet)
+data/         immutable parquet batches (1 JSONL → 1 file by default)
 ```
 
 ```
@@ -122,6 +122,7 @@ cd "/path/to/Pargali-Ibrahim-Library"
 | Parse dry-run (no writes) | `./venv/bin/python src/parse_raw.py` |
 | One-shot normalize | `./venv/bin/python src/normalize_parquet.py --once` |
 | Normalizer loop | `./venv/bin/python -u src/normalize_parquet.py --loop` |
+| Normalizer loop, merged batches | `NORMALIZE_BATCH_MODE=merged ./venv/bin/python -u src/normalize_parquet.py --loop` |
 | Rollup pass (timer) | `./venv/bin/python src/rollup_parquet.py --run` |
 | Rollup rebuild (all history) | `./venv/bin/python src/rollup_parquet.py --backfill` |
 | Rollup preview (no writes) | `./venv/bin/python src/rollup_parquet.py --run --dry-run` |
@@ -161,7 +162,17 @@ cd "/path/to/Pargali-Ibrahim-Library"
 
 ## Data model
 
-**Layout (current):** `data/{category}/{exchange}/{symbol}/{date}/{time}.parquet` — one immutable batch per raw JSONL file.
+**Layout (current):** `data/{category}/{exchange}/{symbol}/{date}/{time}.parquet` — one immutable batch per raw JSONL file (default, `NORMALIZE_BATCH_MODE=per_file`).
+
+**Merged layout (opt-in):** `NORMALIZE_BATCH_MODE=merged` writes one batch per turn and category (and per date when a catch-up spans days):
+
+```
+data/{category}/{exchange}/{symbol}/{date}/{first}--{last}.parquet
+```
+
+`first`/`last` are the `HH-MM-SS` stamps of the first and last raw file in the file, so a name is readable and cannot collide with a per-file batch name (`--` separator). A turn larger than 64 raw files is split into deterministic chunks; a crash between writing the parquet and saving state is recovered on the next turn from the file's footer (`normalizer.raw_sources`) instead of rewriting or duplicating rows. Merged files use `row_group_size=100000` so DuckDB predicate pushdown on `timestamp` keeps working. The normalizer never overwrites an existing batch: a name collision with a different source set is logged as an error and the raw files stay unprocessed.
+
+> **Rollup caveat:** `src/rollup_parquet.py` only recognizes `HH-MM-SS.parquet` source names, so it ignores merged batches until the rollup scanner learns the merged name. That is why merged mode is opt-in and off by default; `data/` itself stays complete.
 
 **Legacy (deprecated):** `data/{category}/{exchange}/{symbol}/{day}.parquet` — daily rollup from old converter.
 
@@ -344,8 +355,9 @@ BTC symbol lists: `TARGET_SYMBOLS` / `TRADE_MARKETS` in `collect_raw.py`.
 ## Operational notes
 
 - **No historical backfill** — recording starts when collectors connect.
-- **Raw retention (optional)** — by default the normalizer does **not** delete raw JSONL. When enabled, retention runs after each normalize batch in `--loop` (evaluation throttled to once per hour after a full run). Deletes raw (Binance and Polymarket) only when the matching batch parquet exists and raw is older than 1h; backlog is reported as a metric but never blocks deletion. See AGENTS.md for rollout.
+- **Raw retention (optional)** — by default the normalizer does **not** delete raw JSONL. When enabled, retention runs after each normalize batch in `--loop` (evaluation throttled to once per hour after a full run). Deletes raw (Binance and Polymarket) only when the batch recorded in `state/processed.json` still exists and raw is older than 1h; backlog is reported as a metric but never blocks deletion. Skip reasons on `:9101` are distinct: `no_mapping` = no batch in state and no legacy per-file batch on disk, `no_parquet` = state records a batch that is missing. See AGENTS.md for rollout.
 - **Parquet backlog** — metric `mdp_pipeline_parquet_raw_backlog_files` on `:9101`.
+- **`mdp_pipeline_parquet_files_processed_total` counts raw JSONL source files**, not parquet files: in merged mode one batch covers every raw file of the turn, so compare it with `parquet_batches_written` (logs) rather than with the number of files under `data/`.
 - **Liquidations are sparse** — empty liquidation batches are normal.
 - **Prometheus** scrapes host ports via `host.docker.internal` — keep collectors + normalizer running.
 

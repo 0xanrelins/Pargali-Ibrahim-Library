@@ -46,9 +46,13 @@ parquet_last_batch_files_processed = Gauge(
     "Raw files processed in the last parquet conversion batch.",
 )
 
+# Raw *source* files, not output files: in merged mode one parquet batch
+# covers every raw JSONL file in the chunk, so this counter and the on-disk
+# parquet count intentionally differ. See README "Operational notes".
 parquet_files_processed_total = Counter(
     "mdp_pipeline_parquet_files_processed_total",
-    "Total raw files successfully converted to parquet.",
+    "Total raw JSONL files successfully converted to parquet "
+    "(merged batches count their raw sources, not the parquet files written).",
 )
 
 parquet_failed_conversions_total = Counter(
@@ -98,7 +102,9 @@ raw_retention_run_skipped = Gauge(
 
 raw_retention_skipped_files_last_run = Gauge(
     "mdp_raw_retention_skipped_files_last_run",
-    "Files skipped on the last retention run, by reason, exchange, and category.",
+    "Files skipped on the last retention run by reason (no_mapping: no recorded "
+    "batch and no legacy per-file batch; no_parquet: recorded batch missing on "
+    "disk; grace: younger than the grace period), exchange, and category.",
     ["reason", "exchange", "category"],
 )
 
