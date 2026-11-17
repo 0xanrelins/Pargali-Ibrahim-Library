@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import operator
@@ -19,6 +20,17 @@ logger = logging.getLogger(__name__)
 
 PARQUET_COMPRESSION = "zstd"
 PARQUET_COMPRESSION_LEVEL = 1
+
+# Merged batches are large, so their row groups are bounded explicitly: DuckDB
+# uses row-group statistics for predicate pushdown on ``timestamp``, and
+# 100k rows keeps a group in the tens of MB rather than one huge group.
+MERGED_ROW_GROUP_SIZE = 100_000
+
+# Footer keys written into merged batches. ``raw_sources`` is the crash-recovery
+# contract: the next turn adopts a published file whose sources are not in
+# state, instead of re-normalizing those raw files into a second file.
+MERGED_SOURCES_METADATA_KEY = b"normalizer.raw_sources"
+MERGED_MODE_METADATA_KEY = b"normalizer.batch_mode"
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
@@ -240,23 +252,8 @@ class ParquetBatchWriter:
         """Write one immutable parquet batch. Creates parent dirs; tmp + atomic rename."""
         self._require_open()
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = out_path.with_name(f"{out_path.name}.tmp")
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-        try:
-            table = rows_to_arrow(rows, category)
-            pq.write_table(
-                table,
-                tmp_path,
-                compression=PARQUET_COMPRESSION,
-                compression_level=PARQUET_COMPRESSION_LEVEL,
-            )
-            os.replace(tmp_path, out_path)
-        except BaseException:
-            _discard_path(tmp_path)
-            raise
+        table = rows_to_arrow(rows, category)
+        _write_table_atomic(table, out_path)
 
         logger.debug("Wrote parquet batch: %s (%s rows)", out_path, len(rows))
         return len(rows)
@@ -274,6 +271,74 @@ class ParquetBatchWriter:
     def _require_open(self) -> None:
         if self._closed:
             raise RuntimeError("ParquetBatchWriter is closed")
+
+
+def write_merged_parquet_batch(
+    out_path: Path,
+    tables: list[pa.Table],
+    category: str,
+    *,
+    source_paths: list[str],
+    row_group_size: int = MERGED_ROW_GROUP_SIZE,
+) -> int:
+    """Publish one merged parquet batch atomically.
+
+    ``tables`` are per-raw-file tables produced by :func:`rows_to_arrow`, in raw
+    order; concatenation keeps that order and the contract schema. The footer
+    records the raw source paths (crash recovery) and the batch mode. An empty
+    batch still publishes a valid, schema-only parquet file, matching the
+    per-file writer's behavior for empty raw files.
+    """
+    if not source_paths:
+        raise ValueError("A merged batch needs at least one source path")
+
+    table = pa.concat_tables(tables) if tables else arrow_schema(category).empty_table()
+    metadata = dict(table.schema.metadata or {})
+    metadata[MERGED_SOURCES_METADATA_KEY] = json.dumps(sorted(source_paths)).encode("utf-8")
+    metadata[MERGED_MODE_METADATA_KEY] = b"merged"
+    table = table.replace_schema_metadata(metadata)
+
+    # The parquet file and its footer are written before the state file, so a
+    # crash in between leaves a complete published batch behind (see
+    # ``normalizer.merged.recover_orphaned_merged_batches``).
+    _write_table_atomic(table, out_path, row_group_size=row_group_size)
+    logger.debug(
+        "Wrote merged parquet batch: %s (%s rows from %s raw files)",
+        out_path,
+        table.num_rows,
+        len(source_paths),
+    )
+    return table.num_rows
+
+
+def _write_table_atomic(
+    table: pa.Table,
+    out_path: Path,
+    *,
+    row_group_size: int | None = None,
+) -> None:
+    """Write ``table`` to a sibling tmp file, then ``os.replace`` onto ``out_path``."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_name(f"{out_path.name}.tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    write_kwargs: dict[str, object] = {}
+    if row_group_size is not None:
+        write_kwargs["row_group_size"] = row_group_size
+
+    try:
+        pq.write_table(
+            table,
+            tmp_path,
+            compression=PARQUET_COMPRESSION,
+            compression_level=PARQUET_COMPRESSION_LEVEL,
+            **write_kwargs,
+        )
+        os.replace(tmp_path, out_path)
+    except BaseException:
+        _discard_path(tmp_path)
+        raise
 
 
 def _discard_path(path: Path) -> None:

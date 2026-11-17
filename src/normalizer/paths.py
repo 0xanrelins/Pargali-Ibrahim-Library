@@ -94,3 +94,32 @@ def batch_parquet_path_from_jsonl(
         parsed.date,
         parsed.batch_stamp,
     )
+
+
+def per_file_batch_rel_path(
+    rel_raw_path: str,
+    *,
+    project_root: Path,
+    data_root: Path,
+    require_exists: bool = True,
+) -> str | None:
+    """Historical 1:1 batch path for a processed raw path, only if it exists.
+
+    Used to migrate state written before ``processed_batches`` existed, and by
+    retention for entries that still have no mapping. The historical batch is
+    accepted as proof only when the parquet file is actually on disk, which is
+    exactly the rule the per-file retention pass used. Pass ``require_exists=False``
+    to get the expected path without the existence check (retention reports
+    ``no_parquet`` for a legacy entry whose historical batch is gone).
+    """
+    try:
+        out_path = batch_parquet_path_from_jsonl(
+            project_root / rel_raw_path,
+            project_root=project_root,
+            data_root=data_root,
+        )
+    except ValueError:
+        return None
+    if require_exists and not out_path.exists():
+        return None
+    return relative_to_project(out_path, project_root)

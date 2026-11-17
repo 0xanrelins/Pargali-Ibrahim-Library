@@ -1,14 +1,29 @@
 """Normalizer: raw JSONL → immutable parquet batches."""
 
 from normalizer.batch import normalize_jsonl_batch
+from normalizer.merged import (
+    chunk_pending,
+    merged_batch_path,
+    read_merged_sources,
+    recover_orphaned_merged_batches,
+)
 from normalizer.parser import parse_jsonl_file
 from normalizer.paths import (
     batch_parquet_path_from_jsonl,
     parse_raw_jsonl_path,
+    per_file_batch_rel_path,
     project_paths,
     relative_to_project,
 )
-from normalizer.runner import collect_backlog_metrics, normalize_once
+from normalizer.runner import (
+    BATCH_MODE_ENV,
+    BATCH_MODE_MERGED,
+    BATCH_MODE_PER_FILE,
+    DEFAULT_BATCH_MODE,
+    collect_backlog_metrics,
+    normalize_once,
+    resolve_batch_mode,
+)
 from normalizer.schemas import (
     category_columns,
     create_empty_table_sql,
@@ -16,29 +31,48 @@ from normalizer.schemas import (
     normalized_categories,
 )
 from normalizer.state import (
+    ProcessedState,
     load_polymarket_tokens,
     load_processed_files,
+    load_processed_state,
+    migrate_legacy_batch_mappings,
     save_polymarket_tokens,
     save_processed_files,
+    save_processed_state,
 )
-from normalizer.writer import write_parquet_batch
+from normalizer.writer import write_merged_parquet_batch, write_parquet_batch
 
 __all__ = [
+    "BATCH_MODE_ENV",
+    "BATCH_MODE_MERGED",
+    "BATCH_MODE_PER_FILE",
+    "DEFAULT_BATCH_MODE",
+    "ProcessedState",
     "batch_parquet_path_from_jsonl",
     "category_columns",
+    "chunk_pending",
     "create_empty_table_sql",
     "insert_typed_select_sql",
     "collect_backlog_metrics",
     "load_polymarket_tokens",
     "load_processed_files",
+    "load_processed_state",
+    "merged_batch_path",
+    "migrate_legacy_batch_mappings",
     "normalize_jsonl_batch",
     "normalize_once",
     "normalized_categories",
     "parse_jsonl_file",
     "parse_raw_jsonl_path",
+    "per_file_batch_rel_path",
     "project_paths",
+    "read_merged_sources",
+    "recover_orphaned_merged_batches",
     "relative_to_project",
+    "resolve_batch_mode",
     "save_polymarket_tokens",
     "save_processed_files",
+    "save_processed_state",
+    "write_merged_parquet_batch",
     "write_parquet_batch",
 ]
