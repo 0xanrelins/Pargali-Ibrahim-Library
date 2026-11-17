@@ -36,7 +36,7 @@ Optional future tiers (derived, knowledge, agent) are under `archive/tier2/` —
 | `src/run_polymarket_collector.py` | Wrapper + `:9103` metrics |
 | `src/parse_raw.py` / `src/parse_polymarket.py` | JSONL → row dicts |
 | `src/normalize_parquet.py` | Normalizer CLI (`--once` / `--loop`) on `:9101` |
-| `src/normalizer/` | Arrow parquet writer, schemas, paths, runner (1 JSONL → 1 parquet) |
+| `src/normalizer/` | Arrow parquet writer, schemas, paths, runner (1 JSONL → 1 parquet by default; optional per-turn merged batches) |
 | `src/rollup_parquet.py` | Derived rollup layer (`data_rollup/`, hourly + daily) — read-only on `data/` |
 | `src/convert_parquet.py` | **Deprecated** — delegates to `normalize_parquet.py` |
 | `archive/tier2/` | Derived, knowledge, agent, catalog, coverage, quality (not runtime) |
@@ -68,7 +68,8 @@ Run Python with `PYTHONPATH=src` or from project root using `./venv/bin/python s
 
 ```
 raw/{exchange}/{category}/{date}/{time}.jsonl
-data/{category}/{exchange}/{symbol}/{date}/{time}.parquet   # immutable batches (current)
+data/{category}/{exchange}/{symbol}/{date}/{time}.parquet   # immutable batches (current, per-file mode)
+data/{category}/{exchange}/{symbol}/{date}/{first}--{last}.parquet  # merged mode (opt-in)
 data/{category}/{exchange}/{symbol}/{day}.parquet             # legacy daily rollup (deprecated)
 
 data_rollup/hourly/{category}/{exchange}/{symbol}/{date}/{HH}.parquet   # derived, last N days
@@ -90,7 +91,15 @@ Registry: `src/datasets.py` — add new sources/categories here first.
 
 **Project goal:** collect raw JSONL and write immutable normalized parquet batches — nothing else.
 
-Normalizer state lives in `state/processed.json` (which raw JSONL files were normalized). It is written **once per batch** (atomic tmp + `os.replace`), and each batch prunes entries whose raw JSONL no longer exists on disk, so the file stays proportional to `raw/`. Parquet batches live under `data/`. By default raw JSONL is **not deleted**. Optional retention (feature-flagged) deletes eligible raw batches on an hourly schedule; see **Raw retention** below.
+Normalizer state lives in `state/processed.json` (version 2): `processed_files` lists every normalized raw JSONL path, and `processed_batches` maps each raw path to the parquet batch that holds it. Legacy state (flat `processed_files` only) is still read; on load, entries whose historical 1:1 batch exists get their mapping derived once (one-way, idempotent, no entries lost), and the mapping is persisted on the next state write. It is written **once per batch** (atomic tmp + `os.replace`), and each batch prunes entries whose raw JSONL no longer exists on disk, so the file stays proportional to `raw/`. Parquet batches live under `data/`. By default raw JSONL is **not deleted**. Optional retention (feature-flagged) deletes eligible raw batches on an hourly schedule; see **Raw retention** below.
+
+### Merged batch mode (opt-in)
+
+`NORMALIZE_BATCH_MODE=per_file` (default) keeps the historical 1 JSONL → 1 parquet mapping, so deploying this code does not change on-disk behavior. `NORMALIZE_BATCH_MODE=merged` writes one file per turn/category/date:
+
+`data/{category}/{exchange}/{symbol}/{date}/{first}--{last}.parquet`
+
+Raw-file order and row order are preserved. A file that fails to parse is left out (and retried next turn); it never causes a partial batch to be published with a misleading source list. Parquet footer metadata (`normalizer.raw_sources`) lets the next turn adopt a batch that was published before a crash prevented the state write, without overwriting or duplicating rows. Row groups are capped at 100k rows for predicate pushdown. `src/rollup_parquet.py` only recognizes `HH-MM-SS.parquet`, so merged batches are invisible to the derived rollup layer until it learns the merged name — keep the default mode until that follow-up ships.
 
 **Never run two processes on `:9101`** (old converter loop + normalizer loop).
 
@@ -109,11 +118,11 @@ Module: `src/normalizer/raw_retention.py`, triggered from `normalize_parquet.py 
 
 **Delete only when all gates pass:**
 
-1. Matching batch parquet exists (`batch_parquet_path_from_jsonl`).
+1. The batch recorded in `processed_batches` exists on disk. Legacy entries without a mapping fall back to the historical 1:1 path, and only when that parquet exists.
 2. Raw mtime older than grace period.
 3. Source/category has `has_parquet_pipeline=True` (Binance and Polymarket pipeline categories).
 
-`processed.json` is backlog signal only, not deletion proof. Retention applies to Polymarket the same as Binance once the matching batch parquet exists.
+`processed_files` is backlog signal only; the batch mapping is the deletion proof. A merged batch that state never recorded (crash before the state write) therefore keeps its raw files. The skip metric separates the two cases: `no_mapping` means state has no mapping for the raw file **and** the legacy per-file parquet does not exist either, so nothing on disk proves it was normalized; `no_parquet` means state records a batch but that parquet is missing (deleted/moved after publication). Retention applies to Polymarket the same as Binance. The normalizer persists `state/polymarket_tokens.json` in both batch modes whenever a `prediction_metadata` batch adds an asset → outcome mapping.
 
 **Metrics on `:9101`:** `mdp_raw_retention_would_delete_*` (dry-run), `mdp_raw_retention_files_deleted_total` / `mdp_raw_retention_bytes_freed_total` (live), skip gauges labeled by `reason/exchange/category`, informational backlog gauge `mdp_raw_retention_backlog_files` by `category` (never blocks deletion).
 
@@ -132,7 +141,7 @@ Polymarket raw is included under the same gates after parquet exists. Unprocesse
 2. **Optional:** archive legacy daily rollups: `mv data data_legacy` (creates empty `data/` for batch layout).
 3. **Reset** `state/processed.json` if raw JSONL must be re-normalized into batch layout (old converter marked files processed but wrote `{day}.parquet`, not batch paths).
 4. Start `./venv/bin/python -u src/normalize_parquet.py --loop`.
-5. Verify 1:1 audit: each `raw/.../{time}.jsonl` eventually has `data/.../{date}/{time}.parquet`.
+5. Verify the audit: in per-file mode each `raw/.../{time}.jsonl` eventually has `data/.../{date}/{time}.parquet`; in merged mode its path is the batch recorded in `processed_batches`.
 
 ### Manual catch-up (large backlog)
 
@@ -158,7 +167,48 @@ Check backlog on `:9101`: `mdp_pipeline_parquet_raw_backlog_files`.
 3. Remove matching paths from `state/processed.json`.
 4. Run `--once` or restart `--loop`.
 
-Immutable batches are write-once; there is no append race. Re-run overwrites the same batch path atomically.
+Immutable batches are write-once; there is no append race. Re-run overwrites the same batch path atomically. In merged mode, removing entries from `processed_batches` also makes retention refuse to delete those raw files until they are re-normalized.
+
+### Merged batch collision (same name, different sources)
+
+**Symptom:** in merged mode one category stops draining while the others keep
+normalizing; `mdp_pipeline_parquet_failed_conversions_total{reason="merged_collision"}`
+rises and the backlog gauge for that category stays flat. Log line on `:9101`:
+
+```
+Refusing to overwrite merged batch with a different source set:
+.../data/{category}/binance_futures/BTCUSDT/{date}/{first}--{last}.parquet
+```
+
+**Cause:** a file at that batch name already exists but its footer
+(`normalizer.raw_sources`) lists a different source set — for example a
+restored/edited `processed.json`, a re-created raw file under the same stamp, or
+raw files copied in from another host. The normalizer never overwrites a
+published batch, and there is deliberately no automatic way out.
+
+**Operator procedure:**
+
+1. Stop `normalize_parquet.py --loop` (never run two writers on `:9101`).
+2. Read the existing batch's footer and compare it with the pending raw files and
+   with `processed_batches` in `state/processed.json`:
+   `PYTHONPATH=src ./venv/bin/python -c "from normalizer.merged import read_merged_sources; print(read_merged_sources('data/.../{first}--{last}.parquet'))"`.
+3. Pick the matching case — never start by deleting the parquet:
+   - **Every pending raw file is listed in the footer.** The batch already
+     contains those rows and only the state mapping was lost: add a
+     `processed_batches` entry per raw file pointing at the existing batch,
+     keep the parquet, restart. Nothing is rewritten.
+   - **The batch is stale and every source in its footer still exists in
+     `raw/`.** Move the old parquet out of `data/` (keep it until the rebuild is
+     verified), remove its sources from `processed_files`/`processed_batches`,
+     then run `--once` so the batch is rebuilt from raw.
+   - **A footer source is gone from `raw/`.** The old batch is the only copy of
+     those rows: do not delete or move it. Restore the missing raw files from a
+     backup or accept that the pending raw files stay unprocessed (they are kept
+     on disk and retention reports them as `no_mapping`).
+4. Restart the loop and confirm `merged_collision` stops increasing.
+
+`state/` entries removed while raw stays on disk only make retention skip the
+file (`no_mapping`) until it is re-normalized.
 
 ### Symptoms
 
@@ -166,6 +216,7 @@ Immutable batches are write-once; there is no append race. Re-run overwrites the
 |---------|----------------|
 | Backlog not draining | Normalizer down; check `:9101` / `mdp_up` |
 | jsonl processed but no batch parquet | Old `processed.json` from legacy converter — reset state |
+| One category stuck in merged mode, `merged_collision` rising | See *Merged batch collision* above |
 | Grafana DuckDB panels stale | Panels may still point at legacy `{day}.parquet` paths — separate sprint |
 
 ---

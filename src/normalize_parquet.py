@@ -17,7 +17,7 @@ from normalizer.raw_retention import (
     RawRetentionConfig,
     RawRetentionScheduler,
 )
-from normalizer.runner import NORMALIZE_INTERVAL_SEC, normalize_once
+from normalizer.runner import NORMALIZE_INTERVAL_SEC, normalize_once, resolve_batch_mode
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,11 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
             retention_config.grace_hours,
             retention_config.interval_sec,
         )
-    logger.info("Starting normalizer loop (interval=%ss)", NORMALIZE_INTERVAL_SEC)
+    logger.info(
+        "Starting normalizer loop (interval=%ss, batch_mode=%s)",
+        NORMALIZE_INTERVAL_SEC,
+        resolve_batch_mode(),
+    )
 
     try:
         while not stop_requested:
@@ -150,6 +154,9 @@ def main() -> int:
 
     parser = build_parser()
     args = parser.parse_args()
+    # Validate NORMALIZE_BATCH_MODE before touching any data: an unknown value
+    # must fail loudly at startup, never silently pick a mode.
+    resolve_batch_mode()
     retention_config = retention_config_from_args(args)
 
     if args.loop:

@@ -14,6 +14,7 @@ from metrics.pipeline_registry import (
     raw_retention_backlog_files,
     raw_retention_bytes_freed_total,
     raw_retention_files_deleted_total,
+    raw_retention_skipped_files_last_run,
     raw_retention_would_delete_bytes,
     raw_retention_would_delete_files,
 )
@@ -24,6 +25,7 @@ from normalizer.raw_retention import (
     RawRetentionScheduler,
     run_raw_retention,
 )
+from normalizer.state import load_processed_state, save_processed_state
 
 
 def _write_jsonl(path: Path, *, age_hours: float = 48.0) -> None:
@@ -139,7 +141,7 @@ class RawRetentionTests(unittest.TestCase):
         self.assertEqual(stats["deleted"], 1)
         self.assertGreater(stats["bytes_freed"], 0)
 
-    def test_no_parquet_means_no_delete(self) -> None:
+    def test_no_mapping_and_no_batch_means_no_delete(self) -> None:
         jsonl, _parquet = _binance_trade_paths(self.root)
         _write_jsonl(jsonl, age_hours=48.0)
         self.state_path.write_text(
@@ -156,7 +158,8 @@ class RawRetentionTests(unittest.TestCase):
 
         self.assertTrue(jsonl.exists())
         self.assertEqual(stats["deleted"], 0)
-        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(stats["skipped_no_mapping"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 0)
 
     def test_grace_period_blocks_delete(self) -> None:
         jsonl, parquet = _binance_trade_paths(self.root)
@@ -201,7 +204,8 @@ class RawRetentionTests(unittest.TestCase):
         self.assertFalse(jsonl.exists())
         self.assertTrue(pending.exists())
         self.assertEqual(stats["deleted"], 1)
-        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(stats["skipped_no_mapping"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 0)
         self.assertEqual(raw_retention_backlog_files.labels(category="trades")._value.get(), 1.0)
 
     def test_dry_run_reports_candidates_while_backlog_present(self) -> None:
@@ -226,7 +230,8 @@ class RawRetentionTests(unittest.TestCase):
         self.assertTrue(pending.exists())
         self.assertEqual(stats["would_delete"], 1)
         self.assertEqual(stats["deleted"], 0)
-        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(stats["skipped_no_mapping"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 0)
         self.assertEqual(raw_retention_would_delete_files._value.get(), 1.0)
         self.assertGreater(raw_retention_would_delete_bytes._value.get(), 0.0)
 
@@ -273,7 +278,7 @@ class RawRetentionTests(unittest.TestCase):
         self.assertEqual(stats["would_delete"], 1)
         self.assertEqual(stats["deleted"], 0)
 
-    def test_polymarket_no_parquet_blocks_delete(self) -> None:
+    def test_polymarket_no_mapping_blocks_delete(self) -> None:
         jsonl, _parquet = _polymarket_metadata_paths(self.root)
         _write_jsonl(jsonl, age_hours=48.0)
         self.state_path.write_text(
@@ -292,7 +297,8 @@ class RawRetentionTests(unittest.TestCase):
 
         self.assertTrue(jsonl.exists())
         self.assertEqual(stats["deleted"], 0)
-        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(stats["skipped_no_mapping"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 0)
 
     def test_polymarket_grace_blocks_delete(self) -> None:
         jsonl, parquet = _polymarket_metadata_paths(self.root)
@@ -340,7 +346,8 @@ class RawRetentionTests(unittest.TestCase):
         self.assertFalse(jsonl.exists())
         self.assertTrue(pending.exists())
         self.assertEqual(stats["deleted"], 1)
-        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(stats["skipped_no_mapping"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 0)
         self.assertEqual(
             raw_retention_backlog_files.labels(category="prediction_metadata")._value.get(),
             1.0,
@@ -370,6 +377,148 @@ class RawRetentionTests(unittest.TestCase):
         self.assertEqual(config.grace_hours, 1.0)
         self.assertEqual(config.interval_sec, 3_600.0)
 
+
+class MappedRetentionTests(unittest.TestCase):
+    """Retention trusts the recorded batch mapping, not a derived path."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+        self.data_root = self.root / "data"
+        self.state_path = self.root / "state" / "processed.json"
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.jsonl = (
+            self.root
+            / "raw"
+            / BINANCE_FUTURES
+            / "trades"
+            / "2026-08-14"
+            / "12-00-00.jsonl"
+        )
+        _write_jsonl(self.jsonl, age_hours=48.0)
+        self.raw_rel = f"raw/{BINANCE_FUTURES}/trades/2026-08-14/12-00-00.jsonl"
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    def _merged_parquet(self, name: str = "12-00-00--12-05-00.parquet") -> Path:
+        path = (
+            self.root
+            / "data"
+            / "trades"
+            / BINANCE_FUTURES
+            / "BTCUSDT"
+            / "2026-08-14"
+            / name
+        )
+        _write_parquet(path)
+        return path
+
+    def _save_state(self, batches: dict[str, str], processed: set[str] | None = None) -> None:
+        save_processed_state(
+            self.state_path,
+            processed if processed is not None else set(batches),
+            batches,
+        )
+
+    def test_recorded_merged_batch_allows_delete(self) -> None:
+        merged = self._merged_parquet()
+        self._save_state({self.raw_rel: merged.relative_to(self.root).as_posix()})
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
+        self.assertFalse(self.jsonl.exists())
+        self.assertEqual(stats["deleted"], 1)
+        self.assertEqual(stats["skipped_no_mapping"], 0)
+
+    def test_merged_batch_without_mapping_reports_no_mapping(self) -> None:
+        self._merged_parquet()
+        # Legacy-style state: raw is marked processed, but no batch mapping exists
+        # and the historical per-file batch was never written.
+        self._save_state({}, processed={self.raw_rel})
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
+        self.assertTrue(self.jsonl.exists())
+        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["skipped_no_mapping"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 0)
+
+    def test_mapping_to_missing_batch_blocks_delete(self) -> None:
+        self._save_state({self.raw_rel: "data/trades/binance_futures/BTCUSDT/2026-08-14/missing.parquet"})
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
+        self.assertTrue(self.jsonl.exists())
+        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["skipped_no_parquet"], 1)
+
+    def test_no_mapping_and_no_parquet_are_counted_separately(self) -> None:
+        # Same category, two raw files: one has no mapping at all (never
+        # normalized), the other has a recorded batch that is missing on disk.
+        unmapped = self.root / "raw" / BINANCE_FUTURES / "trades" / "2026-08-14" / "12-05-00.jsonl"
+        _write_jsonl(unmapped, age_hours=48.0)
+        unmapped_rel = unmapped.relative_to(self.root).as_posix()
+        self._save_state(
+            {
+                self.raw_rel: (
+                    "data/trades/binance_futures/BTCUSDT/2026-08-14/12-00-00.parquet"
+                )
+            },
+            processed={self.raw_rel, unmapped_rel},
+        )
+
+        stats = run_raw_retention(
+            project_root=self.root,
+            data_root=self.data_root,
+            state_path=self.state_path,
+            dry_run=False,
+        )
+
+        self.assertTrue(self.jsonl.exists())
+        self.assertTrue(unmapped.exists())
+        self.assertEqual(stats["deleted"], 0)
+        self.assertEqual(stats["skipped_no_mapping"], 1)
+        self.assertEqual(stats["skipped_no_parquet"], 1)
+        self.assertEqual(
+            raw_retention_skipped_files_last_run.labels(
+                reason="no_mapping", exchange=BINANCE_FUTURES, category="trades"
+            )._value.get(),
+            1.0,
+        )
+        self.assertEqual(
+            raw_retention_skipped_files_last_run.labels(
+                reason="no_parquet", exchange=BINANCE_FUTURES, category="trades"
+            )._value.get(),
+            1.0,
+        )
+
+    def test_malformed_raw_path_has_no_recorded_batch(self) -> None:
+        from normalizer.raw_retention import _recorded_batch_rel
+
+        self.assertIsNone(
+            _recorded_batch_rel(
+                rel_path="legacy/flat.jsonl",
+                batches={},
+                project_root=self.root,
+                data_root=self.data_root,
+            )
+        )
 
 class RawRetentionSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
