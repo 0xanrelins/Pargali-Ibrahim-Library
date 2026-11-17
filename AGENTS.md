@@ -69,6 +69,7 @@ Run Python with `PYTHONPATH=src` or from project root using `./venv/bin/python s
 ```
 raw/{exchange}/{category}/{date}/{time}.jsonl
 data/{category}/{exchange}/{symbol}/{date}/{time}.parquet   # immutable batches (current)
+data/{category}/{exchange}/{symbol}/{date}/{first}--{last}.parquet  # merged turn (normalizer PR #10)
 data/{category}/{exchange}/{symbol}/{day}.parquet             # legacy daily rollup (deprecated)
 
 data_rollup/hourly/{category}/{exchange}/{symbol}/{date}/{HH}.parquet   # derived, last N days
@@ -78,9 +79,26 @@ data_rollup/daily/{category}/{exchange}/{symbol}/{date}.parquet         # derive
 `data_rollup/` is a **derived read layer** built by `src/rollup_parquet.py` — never
 the source of truth, never written by the normalizer, safe to delete and rebuild
 (`rm -rf data_rollup && ./venv/bin/python src/rollup_parquet.py --backfill`).
-`data/`, `raw/` and `state/` are only read by it. Retention verification keeps
+`data/`, `raw/` and `state/` are only read by it. Hourly buckets come from each
+row's timestamp, not the batch file name, so both `HH-MM-SS.parquet` and merged
+`first--last.parquet` files are rolled up correctly. Retention verification keeps
 looking at `data/`. Timer: `infra/systemd/pargali-rollup.{service,timer}`
 (`--run` every 10 minutes, hourly rollups kept for `--hourly-days 7`).
+
+Discovery is bounded: a pass opens parquet footers only for day directories in
+the `--hourly-days` window and for days whose daily file is missing or older
+than its day directory; the rest of `data/` is not scanned. A single batch may
+span at most two days — normalizer merged mode must not produce a longer one.
+A zero-row batch is normal and counted separately (`sources_empty`); any other
+unbucketable batch fails the pass (exit 1), and a day with such a batch is not
+rolled up at all so its daily never silently loses rows (its hourly directory
+may still be pruned by the normal `--hourly-days` retention). Stale hourly files
+— an hour the day's sources no longer produce — are removed and the daily is
+rebuilt from the current hour set; a zero-row planned write removes its old
+target too. Restoring batches in place with their mtime preserved can make the
+discovery gate skip that day, so run `--backfill` afterwards. Empty day dirs
+never get a daily, so the gate keeps scanning them (~1,028 in production); the
+cost is one `stat` per day.
 
 Registry: `src/datasets.py` — add new sources/categories here first.
 
