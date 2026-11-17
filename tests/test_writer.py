@@ -1,17 +1,17 @@
 """Tests for the Arrow parquet batch writer.
 
-Parity is asserted against the pre-change writer, reimplemented verbatim in
-``_legacy_write_parquet_batch`` below: a fresh in-memory DuckDB per file,
-``row.get(column)`` column building, typed ``INSERT ... SELECT`` with DuckDB
-``TRY_CAST`` and ``COPY ... COMPRESSION ZSTD`` into a ``.tmp`` file plus
-``os.replace``. DuckDB stays the reference for cast semantics; the writer
-itself no longer uses it.
+Parity is asserted against the pre-change writer vendored verbatim in
+``tests/legacy_duckdb_writer.py``: a reusable in-memory DuckDB session,
+``row.get(column)`` column building, the ``pa.Table.from_pylist`` fast path
+against the fixed schema, typed ``INSERT ... SELECT`` with DuckDB ``TRY_CAST``
+and ``COPY ... COMPRESSION ZSTD`` into a ``.tmp`` file plus ``os.replace``.
+DuckDB stays the reference for cast semantics; the writer itself no longer
+uses it.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,15 +20,12 @@ from unittest import mock
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
+from legacy_duckdb_writer import close_batch_writer as legacy_close_batch_writer
+from legacy_duckdb_writer import write_parquet_batch as legacy_write_parquet_batch
 
 from normalizer import writer as writer_module
 from normalizer.parser import parse_jsonl_file
-from normalizer.schemas import (
-    CATEGORY_SPECS,
-    category_column_specs,
-    create_empty_table_sql,
-    insert_typed_select_sql,
-)
+from normalizer.schemas import CATEGORY_SPECS, category_column_specs
 from normalizer.writer import (
     PARQUET_COMPRESSION,
     ParquetBatchWriter,
@@ -42,33 +39,6 @@ from normalizer.writer import (
 PREDICTION_PRICE = "prediction_price"
 ORDERBOOK_DIFF = "orderbook_diff"
 TRADES = "trades"
-
-
-def _legacy_write_parquet_batch(
-    out_path: Path, rows: list[dict[str, object]], category: str
-) -> int:
-    """The writer as it was before the speed-up (parity reference)."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = out_path.with_name(f"{out_path.name}.tmp")
-    if tmp_path.exists():
-        tmp_path.unlink()
-
-    columns = tuple(name for name, _type in category_column_specs(category))
-    con = duckdb.connect(":memory:")
-    try:
-        con.execute(create_empty_table_sql(category))
-        if rows:
-            con.register("rows", pa.table({c: [row.get(c) for row in rows] for c in columns}))
-            con.execute(insert_typed_select_sql(category))
-        con.execute(
-            f"COPY normalized TO ? (FORMAT PARQUET, COMPRESSION {PARQUET_COMPRESSION.upper()})",
-            [str(tmp_path)],
-        )
-    finally:
-        con.close()
-
-    os.replace(tmp_path, out_path)
-    return len(rows)
 
 
 def _price_row(index: int) -> dict[str, object]:
@@ -191,6 +161,7 @@ class WriterTestBase(unittest.TestCase):
         self.root = Path(self._tmpdir.name)
         close_batch_writer()
         self.addCleanup(close_batch_writer)
+        self.addCleanup(legacy_close_batch_writer)
         self._con = duckdb.connect(":memory:")
         self.addCleanup(self._con.close)
 
@@ -221,7 +192,7 @@ class WriterTestBase(unittest.TestCase):
         legacy_path = self.root / f"legacy_{category}.parquet"
         new_path = self.root / f"new_{category}.parquet"
 
-        self.assertEqual(_legacy_write_parquet_batch(legacy_path, rows, category), len(rows))
+        self.assertEqual(legacy_write_parquet_batch(legacy_path, rows, category), len(rows))
         self.assertEqual(write_parquet_batch(new_path, rows, category), len(rows))
 
         self.assertEqual(
@@ -262,7 +233,7 @@ class WriterParityTest(WriterTestBase):
                 legacy_path = self.root / f"empty_legacy_{category}.parquet"
                 new_path = self.root / f"empty_new_{category}.parquet"
                 self.assertEqual(
-                    _legacy_write_parquet_batch(legacy_path, [], category), 0
+                    legacy_write_parquet_batch(legacy_path, [], category), 0
                 )
                 self.assertEqual(write_parquet_batch(new_path, [], category), 0)
                 self.assertTrue(new_path.exists())
@@ -296,7 +267,8 @@ class WriterTryCastTest(WriterTestBase):
         self.assertEqual(table.column("timestamp").to_pylist(), [None, 13])
         self.assert_matches_legacy(rows, PREDICTION_PRICE)
 
-    def test_floats_in_integer_columns_round_like_duckdb(self) -> None:
+    def test_floats_in_integer_columns_truncate_like_the_old_arrow_path(self) -> None:
+        """The old writer's ``from_pylist`` truncated floats before DuckDB saw them."""
         rows = _dense_rows(5)
         rows[0]["timestamp"] = 2.5
         rows[1]["timestamp"] = -2.5
@@ -306,7 +278,20 @@ class WriterTryCastTest(WriterTestBase):
         table = rows_to_arrow(rows, PREDICTION_PRICE)
         self.assertEqual(
             table.column("timestamp").to_pylist(),
-            [2, -2, 2, 3, 1_762_000_000_000],
+            [2, -2, 1, 2, 1_762_000_000_000],
+        )
+        self.assert_matches_legacy(rows, PREDICTION_PRICE)
+
+    def test_out_of_range_floats_in_integer_columns_become_null(self) -> None:
+        rows = _dense_rows(4)
+        rows[0]["timestamp"] = 9.223372036854776e18  # int64 max + 1 as a float
+        rows[1]["timestamp"] = 1e30
+        rows[2]["timestamp"] = -1e30
+        rows[3]["timestamp"] = 1_762_000_000_000.0
+        table = rows_to_arrow(rows, PREDICTION_PRICE)
+        self.assertEqual(
+            table.column("timestamp").to_pylist(),
+            [None, None, None, 1_762_000_000_000],
         )
         self.assert_matches_legacy(rows, PREDICTION_PRICE)
 
@@ -337,16 +322,253 @@ class WriterTryCastTest(WriterTestBase):
         self.assertEqual(table.column("exchange").to_pylist(), ["true", "false", "true"])
         self.assert_matches_legacy(rows, PREDICTION_PRICE)
 
-    def test_integer_overflow_becomes_null_instead_of_crashing(self) -> None:
-        rows = [_price_row(0)]
-        rows[0]["timestamp"] = 2**70
+    def test_integer_overflow_fails_the_batch_like_the_old_writer(self) -> None:
+        """A Python int outside int64 must raise, not silently become NULL.
+
+        The old ``from_pylist`` fast path raised ``OverflowError``, so the batch
+        failed and the raw file was never marked processed.
+        """
+        for column in ("timestamp", "best_bid"):
+            for value in (2**63, -(2**63) - 1, 2**70, -(2**70)):
+                with self.subTest(column=column, value=value):
+                    rows = [_price_row(0)]
+                    rows[0][column] = value
+                    new_path = self.root / f"overflow_new_{column}.parquet"
+                    legacy_path = self.root / f"overflow_legacy_{column}.parquet"
+
+                    with self.assertRaises(OverflowError):
+                        write_parquet_batch(new_path, rows, PREDICTION_PRICE)
+                    with self.assertRaises(OverflowError):
+                        legacy_write_parquet_batch(
+                            legacy_path, rows, PREDICTION_PRICE
+                        )
+
+                    self.assertFalse(new_path.exists())
+                    self.assertFalse(
+                        new_path.with_name(f"{new_path.name}.tmp").exists()
+                    )
+
+    def test_string_grammar_matches_duckdb_for_flagged_forms(self) -> None:
+        """Signed hex and Unicode digits are NULL, as in DuckDB's TRY_CAST."""
+        rows = _dense_rows(4)
+        rows[0]["timestamp"] = "-0x10"
+        rows[1]["timestamp"] = "+0x10"
+        rows[2]["timestamp"] = "\u0661\u0662\u0663"  # Arabic-Indic digits
+        rows[3]["timestamp"] = "\uff11\uff12\uff13"  # full-width digits
         table = rows_to_arrow(rows, PREDICTION_PRICE)
-        self.assertEqual(table.column("timestamp").to_pylist(), [None])
+        self.assertEqual(table.column("timestamp").to_pylist(), [None] * 4)
+        self.assert_matches_legacy(rows, PREDICTION_PRICE)
+
+    def test_ascii_decimal_and_exponent_strings_are_cast(self) -> None:
+        values = ["123", " 42 ", "+3", "-3", "00123", "12.5", "-12.5", ".5", "5.", "1e3", "1.5e3", "1.e3"]
+        rows = _dense_rows(len(values))
+        for row, value in zip(rows, values, strict=True):
+            row["timestamp"] = value
+        table = rows_to_arrow(rows, PREDICTION_PRICE)
+        self.assertEqual(
+            table.column("timestamp").to_pylist(),
+            [123, 42, 3, -3, 123, 13, -13, 1, 5, 1000, 1500, 1000],
+        )
+        self.assert_matches_legacy(rows, PREDICTION_PRICE)
+
+    def test_unsigned_hex_and_underscores_are_intentionally_stricter(self) -> None:
+        """DuckDB accepts these; the new grammar only accepts ASCII decimal/exponent."""
+        rows = _dense_rows(3)
+        rows[0]["timestamp"] = "0x10"
+        rows[1]["timestamp"] = " 0x10"
+        rows[2]["timestamp"] = "1_000"
+        table = rows_to_arrow(rows, PREDICTION_PRICE)
+        self.assertEqual(table.column("timestamp").to_pylist(), [None, None, None])
+
+        legacy_path = self.root / "stricter_legacy.parquet"
+        legacy_write_parquet_batch(legacy_path, rows, PREDICTION_PRICE)
+        self.assertEqual(
+            pq.read_table(legacy_path).column("timestamp").to_pylist(),
+            [16, 16, 1000],
+            "documents the intentional difference from DuckDB's VARCHAR cast",
+        )
 
     def test_rows_to_arrow_always_uses_the_contract_schema(self) -> None:
         table = rows_to_arrow(_stringy_rows(), PREDICTION_PRICE)
         self.assertEqual(table.schema, arrow_schema(PREDICTION_PRICE))
 
+
+MATRIX_INT_VALUES: tuple[object, ...] = (
+    None,
+    True,
+    False,
+    0,
+    1,
+    -1,
+    2**62,
+    -(2**62),
+    2**63 - 1,
+    -(2**63),
+    2**63,
+    -(2**63) - 1,
+    2**70,
+    -(2**70),
+    0.0,
+    2.5,
+    -2.5,
+    1.5,
+    2.6,
+    -1.5,
+    -1.9,
+    1.9,
+    1e18,
+    9.223372036854776e18,
+    9.3e18,
+    1e30,
+    -1e30,
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    "123",
+    " 42 ",
+    "+3",
+    "-3",
+    "+0",
+    "-0",
+    "000",
+    "12.5",
+    "-12.5",
+    "+12.5",
+    "1e3",
+    "-1e3",
+    "1.5e3",
+    "00123",
+    "",
+    "   ",
+    "not-a-number",
+    "-0x10",
+    "+0x10",
+    "\u0661\u0662\u0663",
+    "\uff11\uff12\uff13",
+    "9223372036854775807",
+    "9223372036854775808",
+    "-9223372036854775809",
+    "1e400",
+    "inf",
+    "nan",
+    "\t7\n",
+)
+
+MATRIX_FLOAT_VALUES: tuple[object, ...] = (
+    None,
+    True,
+    False,
+    0,
+    1,
+    -1,
+    2**70,
+    -(2**70),
+    0.0,
+    0.5,
+    1.5,
+    -1.5,
+    1e308,
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    "-0.0",
+    "0.5",
+    " 0.25 ",
+    ".5",
+    "5.",
+    "+1.5",
+    "1e3",
+    "1e400",
+    "nope",
+    "inf",
+    "nan",
+    "-inf",
+    "-0x10",
+    "+0x10",
+    "\u0661\u0662\u0663",
+    "\uff11\uff12\uff13",
+    "",
+    "   ",
+)
+
+MATRIX_STRING_VALUES: tuple[object, ...] = (
+    None,
+    True,
+    False,
+    0,
+    1,
+    -5,
+    2**70,
+    0.5,
+    1.0,
+    1e30,
+    float("nan"),
+    float("inf"),
+    -0.0,
+    "",
+    "buy",
+    "SELL",
+    "\u0661\u0662\u0663",
+    "\uff11\uff12\uff13",
+    "  spaced  ",
+    "0x10",
+)
+
+
+class WriterCastMatrixTest(WriterTestBase):
+    """One row per value: the vendored old writer and the new writer must agree.
+
+    Exceptions compare by type (both fail the batch) and values compare through
+    ``repr`` so NaN and ``-0.0`` are compared meaningfully. Unsigned hex and
+    underscore strings are *not* in this matrix: the new ASCII-only grammar is
+    intentionally stricter than DuckDB there (covered by
+    ``WriterTryCastTest.test_unsigned_hex_and_underscores_are_intentionally_stricter``).
+    """
+
+    def _written_value(self, path: Path, column: str) -> str:
+        return repr(pq.read_table(path).column(column).to_pylist()[0])
+
+    def _result(
+        self,
+        write: object,
+        path: Path,
+        row: dict[str, object],
+        column: str,
+    ) -> tuple[str, str]:
+        try:
+            write(path, [row], PREDICTION_PRICE)  # type: ignore[operator]
+        except Exception as exc:  # noqa: BLE001 - the failure mode is the assertion
+            return ("error", type(exc).__name__)
+        return ("value", self._written_value(path, column))
+
+    def test_cast_matrix_matches_the_vendored_old_writer(self) -> None:
+        cases = (
+            [("timestamp", value) for value in MATRIX_INT_VALUES]
+            + [("best_bid", value) for value in MATRIX_FLOAT_VALUES]
+            + [("side", value) for value in MATRIX_STRING_VALUES]
+        )
+        self.assertGreaterEqual(len(cases), 109)
+
+        differences: list[tuple[str, object, tuple[str, str], tuple[str, str]]] = []
+        for index, (column, value) in enumerate(cases):
+            row = _price_row(index)
+            row[column] = value
+            legacy = self._result(
+                legacy_write_parquet_batch,
+                self.root / f"matrix_legacy_{index}.parquet",
+                row,
+                column,
+            )
+            current = self._result(
+                write_parquet_batch,
+                self.root / f"matrix_new_{index}.parquet",
+                row,
+                column,
+            )
+            if legacy != current:
+                differences.append((column, value, legacy, current))
+
+        self.assertEqual(differences, [], "cast behaviour differs from the old writer")
 
 class WriterFormatTest(WriterTestBase):
     def test_batch_is_zstd_compressed(self) -> None:

@@ -6,6 +6,8 @@ import logging
 import math
 import operator
 import os
+import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
 import pyarrow as pa
@@ -20,6 +22,17 @@ PARQUET_COMPRESSION_LEVEL = 1
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
+_INT64_MAX_PLUS_ONE = Decimal(_INT64_MAX) + 1
+_INT64_MIN_MINUS_ONE = Decimal(_INT64_MIN) - 1
+
+# ASCII decimal / exponent grammar only: no hex, no binary, no Unicode digits
+# and no PEP 515 underscores. DuckDB's VARCHAR cast accepts some of those, but
+# the parsers only ever produce plain decimal text, and accepting less is the
+# safe direction (see ``_int_from_text``).
+_NUMBER_TEXT = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+_SPECIAL_FLOAT_TEXT = frozenset(
+    {"inf", "+inf", "-inf", "infinity", "+infinity", "-infinity", "nan", "+nan", "-nan"}
+)
 
 # DuckDB contract type (``normalizer.schemas``) → Arrow type for the bulk conversion.
 _ARROW_TYPES: dict[str, pa.DataType] = {
@@ -58,9 +71,14 @@ def rows_to_arrow(rows: list[dict[str, object]], category: str) -> pa.Table:
     type: the common case (values already carry the parsed Python type) is one
     C++ pass with no per-row Python branching. Values the contract type rejects
     (numeric strings, floats in integer columns, ...) take the per-value
-    ``TRY_CAST``-equivalent fallback in :func:`_coerce_value`, so uncastable
-    values become nulls instead of aborting the batch. The resulting table is
-    identical to the one the old DuckDB ``TRY_CAST`` + ``COPY`` writer produced.
+    fallback in :func:`_coerce_value`, which reproduces the old writer's
+    ``TRY_CAST`` results, including its float→BIGINT truncation and its
+    ``OverflowError`` for Python ints outside int64.
+
+    String coercion is deliberately stricter than DuckDB's ``VARCHAR`` cast:
+    only ASCII signed decimal/exponent text is accepted, so hex/binary text,
+    Unicode digits and underscore separators become NULL. The normalizer's
+    parsers do not emit those forms.
     """
     schema = arrow_schema(category)
     arrays = [
@@ -80,8 +98,11 @@ def _column_values(rows: list[dict[str, object]], name: str) -> list[object]:
 
 
 def _column_array(values: list[object], field: pa.Field) -> pa.Array:
-    # ``pa.array`` truncates floats into an integer type instead of raising, so
-    # those columns must go through the explicit TRY_CAST-equivalent rounding.
+    # ``pa.array`` truncates floats into an integer type, which matches the old
+    # Arrow fast path, but it does not reject every value the old writer
+    # rejected. Integer columns containing floats therefore go through the
+    # explicit per-value conversion, and a rejected bulk conversion falls back
+    # to it as well (big Python ints raise ``OverflowError`` there).
     if field.type == pa.int64() and any(isinstance(value, float) for value in values):
         return _coerced_array(values, field)
     try:
@@ -101,7 +122,7 @@ def _coerced_array(values: list[object], field: pa.Field) -> pa.Array:
 
 
 def _coerce_value(value: object, arrow_type: pa.DataType) -> object:
-    """DuckDB ``TRY_CAST(value AS <target>)`` semantics: uncastable → ``None``."""
+    """Old-writer casting semantics: uncastable values become ``None``."""
     if value is None:
         return None
     if arrow_type == pa.int64():
@@ -113,17 +134,26 @@ def _coerce_value(value: object, arrow_type: pa.DataType) -> object:
     return None
 
 
+def _checked_int(value: int) -> int:
+    """Arrow's Python-int conversion only accepts int64; the old writer failed otherwise."""
+    if _INT64_MIN <= value <= _INT64_MAX:
+        return value
+    raise OverflowError("Python int too large to convert to C long")
+
+
 def _to_int64(value: object) -> int | None:
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
-        return value if _INT64_MIN <= value <= _INT64_MAX else None
+        return _checked_int(value)
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
             return None
-        # DuckDB casts DOUBLE → BIGINT with round-half-to-even.
-        rounded = round(value)
-        return rounded if _INT64_MIN <= rounded <= _INT64_MAX else None
+        # The old Arrow ``from_pylist`` fast path truncated floats toward zero
+        # before DuckDB ever saw them (2.5 → 2, -2.5 → -2). Values outside
+        # int64 fall through to NULL, as DuckDB's ``TRY_CAST`` did.
+        truncated = math.trunc(value)
+        return truncated if _INT64_MIN <= truncated <= _INT64_MAX else None
     if isinstance(value, str):
         return _int_from_text(value)
     return None
@@ -131,43 +161,41 @@ def _to_int64(value: object) -> int | None:
 
 def _int_from_text(text: str) -> int | None:
     text = text.strip()
-    if not text:
+    if _NUMBER_TEXT.fullmatch(text) is None:
         return None
     try:
-        parsed = int(text, 10)
-    except ValueError:
-        try:
-            lowered = text.lower()
-            if lowered.lstrip("+-").startswith(("0x", "0b")):
-                parsed = int(text, 0)
-            else:
-                # DuckDB parses decimal/exponent strings for integer targets and
-                # rounds halves away from zero.
-                number = float(text)
-                if math.isnan(number) or math.isinf(number):
-                    return None
-                parsed = math.floor(number + 0.5) if number >= 0 else math.ceil(number - 0.5)
-        except (ValueError, OverflowError):
-            return None
+        if "." not in text and "e" not in text and "E" not in text:
+            parsed = int(text, 10)
+        else:
+            # DuckDB parses decimal/exponent strings (``"12.5"`` → 13) and
+            # rounds halves away from zero. Decimal keeps that exact for
+            # values near the int64 boundary.
+            number = Decimal(text)
+            if number >= _INT64_MAX_PLUS_ONE or number <= _INT64_MIN_MINUS_ONE:
+                return None
+            parsed = int(number.to_integral_value(rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError):
+        return None
     return parsed if _INT64_MIN <= parsed <= _INT64_MAX else None
 
 
 def _to_float64(value: object) -> float | None:
     if isinstance(value, bool):
         return float(value)
-    if isinstance(value, (int, float)):
-        try:
-            return float(value)
-        except OverflowError:
-            return None
+    if isinstance(value, int):
+        return float(_checked_int(value))
+    if isinstance(value, float):
+        return value
     if isinstance(value, str):
         text = value.strip()
-        if not text:
-            return None
-        try:
+        if _NUMBER_TEXT.fullmatch(text) is not None:
+            try:
+                return float(text)
+            except ValueError:
+                return None
+        if text.lower() in _SPECIAL_FLOAT_TEXT:
             return float(text)
-        except ValueError:
-            return None
+        return None
     return None
 
 
@@ -176,10 +204,12 @@ def _to_string(value: object) -> str | None:
         return value
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        return str(_checked_int(value))
+    if isinstance(value, float):
         # DuckDB renders floats with the shortest round-trip representation,
         # which is what ``repr``/``str`` produce for Python floats.
-        return repr(value) if isinstance(value, float) else str(value)
+        return repr(value)
     return None
 
 
@@ -191,6 +221,11 @@ class ParquetBatchWriter:
     file and a failed write leaves the previously published batch untouched.
     The writer holds no per-batch state; the class is kept so callers and the
     process-wide :func:`get_batch_writer` API stay unchanged.
+
+    Schema and values match the old DuckDB writer for every value the parsers
+    produce. A Python int outside int64 raises ``OverflowError`` (the old
+    Arrow fast path failed the same way), so the batch is not published and
+    the runner does not mark the raw file processed.
     """
 
     def __init__(self) -> None:

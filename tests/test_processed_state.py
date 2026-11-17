@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from datasets import BINANCE_FUTURES, parquet_batch_path
+from normalizer import batch as batch_module
 from normalizer import runner
 from normalizer.state import load_processed_files, save_processed_files
 
@@ -130,6 +131,54 @@ class NormalizeOnceStateWriteTests(ProcessedStateTestBase):
             load_processed_files(self.state_path),
             {self.rel(jsonl_path)},
         )
+
+    def test_failed_write_does_not_mark_raw_file_processed(self) -> None:
+        """A batch that raises must stay unprocessed so a retry can pick it up."""
+        jsonl_path = self.write_raw(category="orderbook_diff")
+        jsonl_path.write_text(
+            json.dumps(
+                {
+                    "stream": "btcusdt@depth",
+                    "data": {
+                        "e": "depthUpdate",
+                        "E": 1_762_000_000_000,
+                        "T": 1_762_000_000_001,
+                        "s": "BTCUSDT",
+                        "U": 10,
+                        "u": 11,
+                        "b": [["68000.10", "0.5"]],
+                        "a": [["68001.20", "1.5"]],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.normalize_mock.side_effect = batch_module.normalize_jsonl_batch
+
+        with mock.patch.object(
+            batch_module,
+            "write_parquet_batch",
+            side_effect=OverflowError("Python int too large to convert to C long"),
+        ):
+            stats = runner.normalize_once()
+
+        self.assertEqual(stats["raw_files_seen"], 1)
+        self.assertEqual(stats["raw_files_failed"], 1)
+        self.assertEqual(stats["raw_files_processed"], 0)
+        self.assertEqual(stats["parquet_batches_written"], 0)
+        self.assertEqual(load_processed_files(self.state_path), set())
+
+        out_path = parquet_batch_path(
+            self.data_root,
+            BINANCE_FUTURES,
+            "orderbook_diff",
+            BTC_SYMBOL,
+            "2026-08-14",
+            "12-00-00",
+        )
+        self.assertFalse(out_path.exists())
+        self.assertFalse(out_path.with_name(f"{out_path.name}.tmp").exists())
 
     def test_stop_mid_batch_saves_once_without_pruning(self) -> None:
         first = self.write_raw()

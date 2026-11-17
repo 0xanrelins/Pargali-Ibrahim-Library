@@ -25,6 +25,9 @@ def parse_jsonl_file(
 
     # Stream the raw file instead of materializing a full ``read_text()`` copy
     # plus a ``splitlines()`` list: batches are read once, top to bottom.
+    # This differs from ``str.splitlines()`` only for U+2028/U+0085 inside a
+    # JSON string: they are no longer treated as line breaks, which is correct
+    # for JSONL (a JSON string may contain them unescaped).
     with jsonl_path.open("r", encoding="utf-8") as jsonl_file:
         for raw_line in jsonl_file:
             if exchange == POLYMARKET:
