@@ -109,8 +109,9 @@ def per_file_batch_rel_path(
     retention for entries that still have no mapping. The historical batch is
     accepted as proof only when the parquet file is actually on disk, which is
     exactly the rule the per-file retention pass used. Pass ``require_exists=False``
-    to get the expected path without the existence check (retention reports
-    ``no_parquet`` for a legacy entry whose historical batch is gone).
+    to get the expected path without the existence check (for diagnostics and
+    tests; retention deliberately does not use it, so a missing legacy batch is
+    reported as ``no_mapping`` instead of a path that cannot be trusted).
     """
     try:
         out_path = batch_parquet_path_from_jsonl(

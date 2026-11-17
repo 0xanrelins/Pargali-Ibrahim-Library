@@ -139,7 +139,7 @@ Module: `src/normalizer/raw_retention.py`, triggered from `normalize_parquet.py 
 2. Raw mtime older than grace period.
 3. Source/category has `has_parquet_pipeline=True` (Binance and Polymarket pipeline categories).
 
-`processed_files` is backlog signal only; the batch mapping is the deletion proof. A merged batch that state never recorded (crash before the state write) therefore keeps its raw files (`no_parquet` / `no_mapping` skip reasons). Retention applies to Polymarket the same as Binance.
+`processed_files` is backlog signal only; the batch mapping is the deletion proof. A merged batch that state never recorded (crash before the state write) therefore keeps its raw files. The skip metric separates the two cases: `no_mapping` means state has no mapping for the raw file **and** the legacy per-file parquet does not exist either, so nothing on disk proves it was normalized; `no_parquet` means state records a batch but that parquet is missing (deleted/moved after publication). Retention applies to Polymarket the same as Binance. The normalizer persists `state/polymarket_tokens.json` in both batch modes whenever a `prediction_metadata` batch adds an asset → outcome mapping.
 
 **Metrics on `:9101`:** `mdp_raw_retention_would_delete_*` (dry-run), `mdp_raw_retention_files_deleted_total` / `mdp_raw_retention_bytes_freed_total` (live), skip gauges labeled by `reason/exchange/category`, informational backlog gauge `mdp_raw_retention_backlog_files` by `category` (never blocks deletion).
 
@@ -186,12 +186,54 @@ Check backlog on `:9101`: `mdp_pipeline_parquet_raw_backlog_files`.
 
 Immutable batches are write-once; there is no append race. Re-run overwrites the same batch path atomically. In merged mode, removing entries from `processed_batches` also makes retention refuse to delete those raw files until they are re-normalized.
 
+### Merged batch collision (same name, different sources)
+
+**Symptom:** in merged mode one category stops draining while the others keep
+normalizing; `mdp_pipeline_parquet_failed_conversions_total{reason="merged_collision"}`
+rises and the backlog gauge for that category stays flat. Log line on `:9101`:
+
+```
+Refusing to overwrite merged batch with a different source set:
+.../data/{category}/binance_futures/BTCUSDT/{date}/{first}--{last}.parquet
+```
+
+**Cause:** a file at that batch name already exists but its footer
+(`normalizer.raw_sources`) lists a different source set — for example a
+restored/edited `processed.json`, a re-created raw file under the same stamp, or
+raw files copied in from another host. The normalizer never overwrites a
+published batch, and there is deliberately no automatic way out.
+
+**Operator procedure:**
+
+1. Stop `normalize_parquet.py --loop` (never run two writers on `:9101`).
+2. Read the existing batch's footer and compare it with the pending raw files and
+   with `processed_batches` in `state/processed.json`:
+   `PYTHONPATH=src ./venv/bin/python -c "from normalizer.merged import read_merged_sources; print(read_merged_sources('data/.../{first}--{last}.parquet'))"`.
+3. Pick the matching case — never start by deleting the parquet:
+   - **Every pending raw file is listed in the footer.** The batch already
+     contains those rows and only the state mapping was lost: add a
+     `processed_batches` entry per raw file pointing at the existing batch,
+     keep the parquet, restart. Nothing is rewritten.
+   - **The batch is stale and every source in its footer still exists in
+     `raw/`.** Move the old parquet out of `data/` (keep it until the rebuild is
+     verified), remove its sources from `processed_files`/`processed_batches`,
+     then run `--once` so the batch is rebuilt from raw.
+   - **A footer source is gone from `raw/`.** The old batch is the only copy of
+     those rows: do not delete or move it. Restore the missing raw files from a
+     backup or accept that the pending raw files stay unprocessed (they are kept
+     on disk and retention reports them as `no_mapping`).
+4. Restart the loop and confirm `merged_collision` stops increasing.
+
+`state/` entries removed while raw stays on disk only make retention skip the
+file (`no_mapping`) until it is re-normalized.
+
 ### Symptoms
 
 | Symptom | Likely cause |
 |---------|----------------|
 | Backlog not draining | Normalizer down; check `:9101` / `mdp_up` |
 | jsonl processed but no batch parquet | Old `processed.json` from legacy converter — reset state |
+| One category stuck in merged mode, `merged_collision` rising | See *Merged batch collision* above |
 | Grafana DuckDB panels stale | Panels may still point at legacy `{day}.parquet` paths — separate sprint |
 
 ---

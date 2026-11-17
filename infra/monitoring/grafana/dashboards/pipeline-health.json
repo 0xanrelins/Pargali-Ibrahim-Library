@@ -526,11 +526,11 @@
       "targets": [
         {
           "expr": "mdp_pipeline_parquet_files_processed_total{service=\"market-data-platform-normalizer\"}",
-          "legendFormat": "processed",
+          "legendFormat": "raw source files",
           "refId": "A"
         }
       ],
-      "title": "Parquet Files Processed (total)",
+      "title": "Raw Files Processed to Parquet (total)",
       "type": "timeseries"
     },
     {
