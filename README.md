@@ -191,7 +191,9 @@ cd "/path/to/Pargali-Ibrahim-Library"
 
 `data/` stays the source of truth: one immutable batch per raw JSONL file means
 ~1.4k parquet files per dataset per day, so a plain `count(*)` over one day
-opens ~1.4k footers. `src/rollup_parquet.py` writes a read-optimised copy on top:
+opens ~1.4k footers. With `NORMALIZE_BATCH_MODE=merged` a turn publishes
+`{first}--{last}.parquet` instead, so one file can span several hours.
+`src/rollup_parquet.py` writes a read-optimised copy on top:
 
 ```
 data_rollup/hourly/{category}/{exchange}/{symbol}/{YYYY-MM-DD}/{HH}.parquet
@@ -200,22 +202,33 @@ data_rollup/daily/{category}/{exchange}/{symbol}/{YYYY-MM-DD}.parquet
 
 | Layer | Content | Retention |
 |-------|---------|-----------|
-| `hourly` | every batch of one **closed** hour, merged | last `--hourly-days` days (default 7) |
+| `hourly` | every row whose UTC **timestamp** falls in one **closed** hour | last `--hourly-days` days (default 7) |
 | `daily` | the same day's hourly rollups, merged | all history, written once the day is closed |
 
 Rules:
 
 - **Closed only** — an hour is rolled up 5 minutes after it ends, a day after it
   ends. The newest data is therefore at most ~10 min (timer) + 5 min behind `data/`.
-- **Incremental** — a target is written only when it is missing or older than its
-  newest source; a second pass writes nothing. `--backfill` ignores freshness and
-  rebuilds the whole layer.
+- **Timestamp buckets** — the hour comes from each row's timestamp column
+  (`timestamp` in `src/normalizer/schemas.py`, `event_time` as a future fallback),
+  never from the file name. A merged batch that spans several hours contributes
+  only its own rows to each `HH.parquet`; a per-file batch whose late events
+  belong to another hour is split the same way. The source date directory still
+  decides the day partition, so a day's rollup never drops or duplicates the rows
+  the normalizer filed under that date.
+- **Incremental** — an hourly target is written only when it is missing or older
+  than its newest contributing source; a daily is also rebuilt whenever one of its
+  hourly files is rewritten. A second pass writes nothing. `--backfill` ignores
+  freshness and rebuilds the whole layer.
 - **Atomic** — `tmp` file in the target directory + `os.replace`; a killed run
   leaves the previous file intact. Output is `ZSTD` parquet.
 - **Same schema as `data/`** — columns are cast to the normalizer contract
-  (`src/normalizer/schemas.py`) in contract order. Rows keep the source batch
-  order (one-minute files, event order), so a rollup stays near time-ordered and
+  (`src/normalizer/schemas.py`) in contract order. Rows keep the source file
+  order (batches are near event-ordered), so a rollup stays near time-ordered and
   parquet statistics still prune time ranges — without paying for a sort pass.
+- **Skipped loudly** — a batch that cannot be bucketed (unreadable parquet,
+  missing/non-integer timestamp column, implausible epoch) is logged as a warning
+  and skipped; the rest of the hour still rolls up and `sources_skipped` counts it.
 - **Derived, not history** — `data/`, `raw/` and `state/` are never written. Delete
   `data_rollup/` and rebuild it at any time:
 

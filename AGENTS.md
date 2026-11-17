@@ -69,6 +69,7 @@ Run Python with `PYTHONPATH=src` or from project root using `./venv/bin/python s
 ```
 raw/{exchange}/{category}/{date}/{time}.jsonl
 data/{category}/{exchange}/{symbol}/{date}/{time}.parquet   # immutable batches (current)
+data/{category}/{exchange}/{symbol}/{date}/{first}--{last}.parquet  # merged turn (NORMALIZE_BATCH_MODE=merged)
 data/{category}/{exchange}/{symbol}/{day}.parquet             # legacy daily rollup (deprecated)
 
 data_rollup/hourly/{category}/{exchange}/{symbol}/{date}/{HH}.parquet   # derived, last N days
@@ -78,7 +79,9 @@ data_rollup/daily/{category}/{exchange}/{symbol}/{date}.parquet         # derive
 `data_rollup/` is a **derived read layer** built by `src/rollup_parquet.py` — never
 the source of truth, never written by the normalizer, safe to delete and rebuild
 (`rm -rf data_rollup && ./venv/bin/python src/rollup_parquet.py --backfill`).
-`data/`, `raw/` and `state/` are only read by it. Retention verification keeps
+`data/`, `raw/` and `state/` are only read by it. Hourly buckets come from each
+row's timestamp, not the batch file name, so both `HH-MM-SS.parquet` and merged
+`first--last.parquet` files are rolled up correctly. Retention verification keeps
 looking at `data/`. Timer: `infra/systemd/pargali-rollup.{service,timer}`
 (`--run` every 10 minutes, hourly rollups kept for `--hourly-days 7`).
 

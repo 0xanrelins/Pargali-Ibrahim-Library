@@ -9,11 +9,22 @@ adds a derived read layer on top, and nothing else:
     data_rollup/hourly/{category}/{exchange}/{symbol}/{YYYY-MM-DD}/{HH}.parquet
     data_rollup/daily/{category}/{exchange}/{symbol}/{YYYY-MM-DD}.parquet
 
-* **hourly** — every batch of one closed hour merged into one file. Kept only
-  for the last ``--hourly-days`` days (default 7); older hourly rollups are
-  pruned once the day's daily file exists.
+* **hourly** — every row whose event timestamp falls in one closed UTC hour,
+  merged into one file. The hour comes from the parquet timestamp column, never
+  from the file name, so a merged batch (``first--last.parquet``) that spans
+  several hours contributes only its own rows to each hour. Kept only for the
+  last ``--hourly-days`` days (default 7); older hourly rollups are pruned once
+  the day's daily file exists.
 * **daily** — the same day's hourly rollups merged. Kept for all history, and
   written only after the day has closed.
+
+A source file is never concatenated whole: each hourly rollup selects rows by
+its timestamp column (``timestamp`` in ``normalizer/schemas.py``, with
+``event_time`` as a fallback for future categories). The **day** partition still
+comes from the source directory (``data/.../{YYYY-MM-DD}/``), so a day's rollup
+contains exactly the rows the normalizer filed under that date — including the
+few rows whose timestamp falls just before/after midnight — and the daily rollup
+is always the union of that day's hourly files.
 
 Every output is derived: delete ``data_rollup/`` and rebuild it with
 ``--backfill`` (or let ``--run`` rebuild it incrementally). Losing it is not
@@ -25,7 +36,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import re
 import shutil
 import time
 from collections.abc import Mapping, Sequence
@@ -34,9 +44,11 @@ from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
 
 import duckdb
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from normalizer.paths import project_paths
-from normalizer.schemas import CATEGORY_SPECS, category_column_specs
+from normalizer.schemas import CATEGORY_SPECS, category_column_specs, category_columns
 
 logger = logging.getLogger(__name__)
 
@@ -54,30 +66,68 @@ STALE_TEMP_MAX_AGE_SEC = 3600
 PROGRESS_EVERY_FILES = 200
 
 UTC = timezone.utc
-BATCH_STAMP_PATTERN = re.compile(r"^(?P<hour>\d{2})-(?P<minute>\d{2})-(?P<second>\d{2})$")
+HOUR_MS = 3_600_000
+DAY_MS = 86_400_000
+# Timestamps are BIGINT epoch milliseconds (``normalizer/schemas.py``). Anything
+# outside 2000-01-01 .. 2100-01-01, or a span longer than two days, is treated
+# as a broken batch instead of silently landing in year 1970's hour bucket.
+PLAUSIBLE_EPOCH_MS_MIN = 946_684_800_000
+PLAUSIBLE_EPOCH_MS_MAX = 4_102_444_800_000
+MAX_SOURCE_SPAN_MS = 2 * DAY_MS
+# Preferred time columns, in order, mirroring ``normalizer/schemas.py``. Every
+# current category starts with ``timestamp``; ``event_time`` is only a fallback
+# for a future category that does not have ``timestamp``.
+TIME_COLUMN_CANDIDATES: tuple[str, ...] = ("timestamp", "event_time")
+_TIME_COLUMNS: dict[str, str | None] = {}
+
+
+def category_time_column(category: str) -> str | None:
+    """The column that carries event time for ``category``, or ``None``.
+
+    A category without a usable time column cannot be bucketed by timestamp, so
+    the rollup skips it with a warning instead of guessing from file names.
+    """
+    if category in _TIME_COLUMNS:
+        return _TIME_COLUMNS[category]
+    columns = category_columns(category)
+    chosen = next((name for name in TIME_COLUMN_CANDIDATES if name in columns), None)
+    _TIME_COLUMNS[category] = chosen
+    return chosen
 
 
 @dataclass(frozen=True)
 class SourceBatch:
-    """One immutable parquet batch file from ``data/``."""
+    """One immutable parquet batch file from ``data/`` with its timestamp span."""
 
     path: Path
-    hour: int
     mtime: float
+    start_ms: int
+    end_ms: int
+
+    def hours(self) -> tuple[int, ...]:
+        return hours_covered(self.start_ms, self.end_ms)
+
+
+def hours_covered(start_ms: int, end_ms: int) -> tuple[int, ...]:
+    """UTC hour-of-day values a ``[start_ms, end_ms]`` span can fall into."""
+    first = start_ms // HOUR_MS
+    last = end_ms // HOUR_MS
+    return tuple(sorted({hour % 24 for hour in range(first, last + 1)}))
 
 
 @dataclass(frozen=True)
 class DayGroup:
-    """All batches of one dataset for one day, grouped per hour."""
+    """All batches of one dataset for one day directory, grouped per hour."""
 
     category: str
     exchange: str
     symbol: str
     day: date
+    sources: tuple[SourceBatch, ...]
     hours: Mapping[int, tuple[SourceBatch, ...]]
 
     def newest_mtime(self) -> float:
-        return max(batch.mtime for batches in self.hours.values() for batch in batches)
+        return max(batch.mtime for batch in self.sources)
 
 
 @dataclass(frozen=True)
@@ -144,6 +194,7 @@ class RollupStats:
     daily_rows: int = 0
     daily_bytes: int = 0
     daily_skipped_empty: int = 0
+    sources_skipped: int = 0
     hourly_dirs_pruned: int = 0
     temp_files_cleaned: int = 0
     hours_skipped_fresh: int = 0
@@ -163,6 +214,7 @@ class RollupStats:
             "daily_rows": self.daily_rows,
             "daily_bytes": self.daily_bytes,
             "daily_skipped_empty": self.daily_skipped_empty,
+            "sources_skipped": self.sources_skipped,
             "hourly_dirs_pruned": self.hourly_dirs_pruned,
             "temp_files_cleaned": self.temp_files_cleaned,
             "hours_skipped_fresh": self.hours_skipped_fresh,
@@ -240,39 +292,207 @@ def _parse_day(name: str) -> date | None:
 # --------------------------------------------------------------------------- #
 
 
-def scan_day_batches(day_dir: Path) -> dict[int, tuple[SourceBatch, ...]]:
-    """Group one ``data/{category}/{exchange}/{symbol}/{date}/`` dir into hours.
+def read_time_span(path: Path, *, time_column: str) -> tuple[int, int, int] | None:
+    """``(start_ms, end_ms, rows_without_time)`` for one parquet batch.
 
-    Only names shaped like the normalizer's ``HH-MM-SS.parquet`` batch stamp are
-    considered; anything else (legacy ``{day}.parquet`` files live one level up,
-    partial ``.tmp`` files) is ignored.
+    Reads only the footer: row-group statistics give min/max without touching
+    the data pages. If a row group does not carry statistics, the timestamp
+    column alone is read as a fallback. Returns ``None`` (and logs why) for a
+    file that cannot be bucketed, so the caller can skip it loudly.
     """
+    try:
+        metadata = pq.ParquetFile(path).metadata
+    except Exception:
+        logger.warning("Skipping unreadable parquet batch: %s", path, exc_info=True)
+        return None
+    if metadata is None or metadata.num_rows == 0:
+        logger.debug("Skipping empty parquet batch: %s", path)
+        return None
+    try:
+        column_index = metadata.schema.names.index(time_column)
+    except ValueError:
+        logger.warning(
+            "Skipping parquet batch without a %r column: %s", time_column, path
+        )
+        return None
+    physical_type = metadata.schema.column(column_index).physical_type
+    if physical_type not in {"INT64", "INT32"}:
+        logger.warning(
+            "Skipping parquet batch whose %r column is %s, not an integer: %s",
+            time_column,
+            physical_type,
+            path,
+        )
+        return None
+
+    lowest: int | float | None = None
+    highest: int | float | None = None
+    null_rows = 0
+    for group in range(metadata.num_row_groups):
+        statistics = metadata.row_group(group).column(column_index).statistics
+        if statistics is None or not statistics.has_min_max:
+            fallback = _read_time_span_from_column(path, time_column)
+            if fallback is None:
+                return None
+            lowest, highest, null_rows = fallback
+            break
+        null_rows += statistics.null_count or 0
+        lowest = statistics.min if lowest is None else min(lowest, statistics.min)
+        highest = statistics.max if highest is None else max(highest, statistics.max)
+
+    if lowest is None or highest is None:
+        fallback = _read_time_span_from_column(path, time_column)
+        if fallback is None:
+            return None
+        lowest, highest, null_rows = fallback
+
+    try:
+        start_ms = int(lowest)
+        end_ms = int(highest)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Skipping parquet batch with a non-integer %r value: %s", time_column, path
+        )
+        return None
+    if start_ms > end_ms:
+        logger.warning(
+            "Skipping parquet batch with an inverted %r span (%s..%s): %s",
+            time_column,
+            start_ms,
+            end_ms,
+            path,
+        )
+        return None
+    if not (
+        PLAUSIBLE_EPOCH_MS_MIN <= start_ms <= PLAUSIBLE_EPOCH_MS_MAX
+        and PLAUSIBLE_EPOCH_MS_MIN <= end_ms <= PLAUSIBLE_EPOCH_MS_MAX
+    ):
+        logger.warning(
+            "Skipping parquet batch with an implausible %r span (%s..%s): %s",
+            time_column,
+            start_ms,
+            end_ms,
+            path,
+        )
+        return None
+    if end_ms - start_ms > MAX_SOURCE_SPAN_MS:
+        logger.warning(
+            "Skipping parquet batch whose %r span exceeds %d days: %s",
+            time_column,
+            MAX_SOURCE_SPAN_MS // DAY_MS,
+            path,
+        )
+        return None
+    if null_rows:
+        logger.warning(
+            "Parquet batch has %d row(s) without %r; they are excluded from rollups: %s",
+            null_rows,
+            time_column,
+            path,
+        )
+    return start_ms, end_ms, null_rows
+
+
+def _read_time_span_from_column(
+    path: Path, time_column: str
+) -> tuple[int, int, int] | None:
+    """Fallback span read when parquet statistics are missing."""
+    try:
+        column = pq.read_table(path, columns=[time_column]).column(time_column)
+    except Exception:
+        logger.warning(
+            "Could not read %r from parquet batch: %s", time_column, path, exc_info=True
+        )
+        return None
+    null_rows = column.null_count
+    values = pc.drop_null(column)
+    if len(values) == 0:
+        logger.warning(
+            "Skipping parquet batch whose %r column is entirely null: %s",
+            time_column,
+            path,
+        )
+        return None
+    bounds = pc.min_max(values).as_py()
+    return int(bounds["min"]), int(bounds["max"]), null_rows
+
+
+def group_sources_by_hour(
+    sources: Sequence[SourceBatch],
+) -> dict[int, tuple[SourceBatch, ...]]:
+    """Map each UTC hour-of-day to the batches whose span can contribute rows."""
     buckets: dict[int, list[SourceBatch]] = {}
-    with os.scandir(day_dir) as entries:
-        for entry in entries:
-            if not entry.name.endswith(".parquet"):
-                continue
-            match = BATCH_STAMP_PATTERN.match(entry.name[: -len(".parquet")])
-            if match is None:
-                logger.debug("Ignoring parquet without a batch stamp: %s", entry.path)
-                continue
-            hour = int(match.group("hour"))
-            if hour > 23:
-                logger.warning("Ignoring parquet with an invalid hour stamp: %s", entry.path)
-                continue
-            buckets.setdefault(hour, []).append(
-                SourceBatch(path=Path(entry.path), hour=hour, mtime=entry.stat().st_mtime)
-            )
+    for batch in sources:
+        for hour in batch.hours():
+            buckets.setdefault(hour, []).append(batch)
     return {
         hour: tuple(sorted(batches, key=lambda batch: batch.path.name))
-        for hour, batches in buckets.items()
+        for hour, batches in sorted(buckets.items())
     }
 
 
-def discover_day_groups(data_root: Path) -> list[DayGroup]:
-    """Every (category, exchange, symbol, day) that has at least one batch."""
+def scan_day_batches(
+    day_dir: Path,
+    category: str,
+    *,
+    skipped: list[Path] | None = None,
+) -> tuple[SourceBatch, ...]:
+    """Read one ``data/{category}/{exchange}/{symbol}/{date}/`` dir.
+
+    Every ``.parquet`` file is a source regardless of its name: the batch stamp
+    (``HH-MM-SS``) and the merged name (``first--last``) are both accepted, and
+    an unexpected name is still read as long as the timestamp column is usable.
+    The UTC hour buckets come from the file's timestamps, not from its name.
+
+    Files that cannot be bucketed (unreadable, no time column, implausible
+    timestamps) are logged and appended to ``skipped`` so the caller can report
+    them; they are never silently dropped.
+    """
+    time_column = category_time_column(category)
+    if time_column is None:
+        logger.warning(
+            "Category %r has no timestamp column (%s); skipping %s",
+            category,
+            ", ".join(TIME_COLUMN_CANDIDATES),
+            day_dir,
+        )
+        return ()
+
+    batches: list[SourceBatch] = []
+    with os.scandir(day_dir) as entries:
+        for entry in entries:
+            if not entry.name.endswith(".parquet") or not entry.is_file():
+                continue
+            path = Path(entry.path)
+            span = read_time_span(path, time_column=time_column)
+            if span is None:
+                if skipped is not None:
+                    skipped.append(path)
+                continue
+            start_ms, end_ms, _null_rows = span
+            batches.append(
+                SourceBatch(
+                    path=path,
+                    mtime=entry.stat().st_mtime,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                )
+            )
+    return tuple(sorted(batches, key=lambda batch: batch.path.name))
+
+
+def discover_day_groups(
+    data_root: Path, *, skipped: list[Path] | None = None
+) -> list[DayGroup]:
+    """Every (category, exchange, symbol, day) that has at least one usable batch."""
     groups: list[DayGroup] = []
     for category in sorted(CATEGORY_SPECS):
+        if category_time_column(category) is None:
+            logger.warning(
+                "Category %r has no timestamp column; its batches are not rolled up",
+                category,
+            )
+            continue
         category_dir = data_root / category
         for exchange_dir in _iter_subdirs(category_dir):
             for symbol_dir in _iter_subdirs(exchange_dir):
@@ -281,8 +501,8 @@ def discover_day_groups(data_root: Path) -> list[DayGroup]:
                     if day is None:
                         logger.debug("Ignoring directory that is not a date: %s", day_dir)
                         continue
-                    hours = scan_day_batches(day_dir)
-                    if not hours:
+                    sources = scan_day_batches(day_dir, category, skipped=skipped)
+                    if not sources:
                         continue
                     groups.append(
                         DayGroup(
@@ -290,7 +510,8 @@ def discover_day_groups(data_root: Path) -> list[DayGroup]:
                             exchange=exchange_dir.name,
                             symbol=symbol_dir.name,
                             day=day,
-                            hours=hours,
+                            sources=sources,
+                            hours=group_sources_by_hour(sources),
                         )
                     )
     return groups
@@ -420,13 +641,9 @@ def _plan_group(
         rollup_root, group.category, group.exchange, group.symbol, group.day
     )
 
-    need_daily = False
-    if not closed:
-        plan.days_skipped_open += 1
-    elif backfill or not _target_is_fresh(daily_target, group.newest_mtime()):
-        need_daily = True
-    else:
-        plan.days_skipped_fresh += 1
+    newest_source = group.newest_mtime()
+    daily_stale = backfill or not _target_is_fresh(daily_target, newest_source)
+    hourly_tasks = 0
 
     for hour in sorted(group.hours):
         batches = group.hours[hour]
@@ -443,7 +660,7 @@ def _plan_group(
         else:
             # Outside the hourly window the layer is only an intermediate: build
             # what the daily rebuild needs, reuse what is still fresh.
-            write = need_daily and not _target_is_fresh(target, newest)
+            write = daily_stale and not _target_is_fresh(target, newest)
 
         if not write:
             plan.hours_skipped_fresh += 1
@@ -460,20 +677,29 @@ def _plan_group(
                 sources=tuple(batch.path for batch in batches),
             )
         )
+        hourly_tasks += 1
 
-    if need_daily:
-        plan.daily_tasks.append(
-            DailyTask(
-                category=group.category,
-                exchange=group.exchange,
-                symbol=group.symbol,
-                day=group.day,
-                target=daily_target,
-                hourly_dir=hourly_rollup_path(
-                    rollup_root, group.category, group.exchange, group.symbol, group.day, 0
-                ).parent,
-            )
+    if not closed:
+        plan.days_skipped_open += 1
+        return
+    if not (daily_stale or hourly_tasks):
+        plan.days_skipped_fresh += 1
+        return
+
+    # The daily layer is the merge of the day's hourly files, so it must be
+    # rewritten whenever an hourly file was (or is about to be) rewritten.
+    plan.daily_tasks.append(
+        DailyTask(
+            category=group.category,
+            exchange=group.exchange,
+            symbol=group.symbol,
+            day=group.day,
+            target=daily_target,
+            hourly_dir=hourly_rollup_path(
+                rollup_root, group.category, group.exchange, group.symbol, group.day, 0
+            ).parent,
         )
+    )
 
 
 def cleanup_stale_temp_files(
@@ -549,16 +775,27 @@ def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def source_select_sql(category: str, sources: Sequence[Path]) -> str:
+def source_select_sql(
+    category: str,
+    sources: Sequence[Path],
+    *,
+    hour: int | None = None,
+) -> str:
     """``SELECT`` projecting the category contract from one or more parquet files.
 
     Columns are cast to the contract types in contract order, so a rollup has
     exactly the schema of its ``data/`` sources and stays stable even if a
     source file was written by an older normalizer.
 
-    Rows are not re-sorted: batches are one-minute files written in event order,
-    so reading them by name already produces a near time-ordered file (and the
-    daily layer inherits that from its hourly inputs). Sorting instead cost 2.4x
+    ``hour`` restricts the read to rows whose UTC hour-of-day matches, using the
+    category's timestamp column. A file that spans several hours therefore
+    contributes only the rows of the bucket being written, never its whole
+    content. The hour is derived from the row timestamp, so merged batches
+    (``first--last.parquet``) and per-file batches (``HH-MM-SS.parquet``) are
+    treated identically; the file name is irrelevant.
+
+    Rows are not re-sorted: batches are near time-ordered and the hourly filter
+    keeps that order, so the daily layer inherits it. Sorting instead cost 2.4x
     more CPU on the VPS, which is the scarce resource there; parquet file and
     row-group statistics still prune time ranges either way.
     """
@@ -569,7 +806,17 @@ def source_select_sql(category: str, sources: Sequence[Path]) -> str:
         f'CAST("{name}" AS {column_type}) AS "{name}"' for name, column_type in specs
     )
     paths = ", ".join(_sql_string(str(Path(source))) for source in sources)
-    return f"SELECT {columns} FROM read_parquet([{paths}])"
+    where_sql = ""
+    if hour is not None:
+        if not 0 <= hour <= 23:
+            raise ValueError(f"hour must be in 0..23, got {hour}")
+        time_column = category_time_column(category)
+        if time_column is None:
+            raise ValueError(f"Category {category!r} has no timestamp column to bucket by")
+        where_sql = (
+            f' WHERE hour(epoch_ms(CAST("{time_column}" AS BIGINT))) = {int(hour)}'
+        )
+    return f"SELECT {columns} FROM read_parquet([{paths}]){where_sql}"
 
 
 def copy_to_parquet(
@@ -634,7 +881,7 @@ class RollupBuilder:
         )
         return copy_to_parquet(
             self._connection(),
-            select_sql=source_select_sql(task.category, task.sources),
+            select_sql=source_select_sql(task.category, task.sources, hour=task.hour),
             target=task.target,
         )
 
@@ -715,7 +962,13 @@ def run_rollup(
         data_root = data_root if data_root is not None else project_data_root
         rollup_root = rollup_root if rollup_root is not None else default_rollup_root(project_root)
 
-    groups = discover_day_groups(Path(data_root))
+    skipped_sources: list[Path] = []
+    groups = discover_day_groups(Path(data_root), skipped=skipped_sources)
+    if skipped_sources:
+        logger.warning(
+            "Skipped %d source batch(es) that could not be bucketed by timestamp",
+            len(skipped_sources),
+        )
     plan = build_plan(
         groups,
         rollup_root=Path(rollup_root),
@@ -726,6 +979,7 @@ def run_rollup(
     )
 
     stats = RollupStats(
+        sources_skipped=len(skipped_sources),
         hours_skipped_fresh=plan.hours_skipped_fresh,
         hours_skipped_open=plan.hours_skipped_open,
         days_skipped_fresh=plan.days_skipped_fresh,
