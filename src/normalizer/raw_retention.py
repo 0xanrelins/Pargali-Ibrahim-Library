@@ -6,9 +6,19 @@ disk, and the file must be older than the grace period.
 
 The recorded batch is the safety proof. State written before batch mappings
 existed (or a raw file whose mapping was lost) falls back to the historical
-1:1 batch path, and only when that parquet actually exists. When neither a
-mapping nor an existing per-file batch can be found, the raw file is kept
-(``no_mapping`` / ``no_parquet``), so a merged batch that was published without
+1:1 batch path, and only when that parquet actually exists. The two skip
+reasons are kept distinct so the metric is actionable:
+
+``no_mapping``
+    State has no batch mapping for the raw file *and* the historical per-file
+    batch does not exist either, so nothing on disk proves the file was
+    normalized. This is the expected state for raw files a merged batch covered
+    without its state write, and for never-normalized files.
+``no_parquet``
+    State records a batch for the raw file but that file is missing on disk
+    (deleted or moved after publication).
+
+Either way the raw file is kept, so a merged batch that was published without
 its state record can never cause the raw source to be deleted.
 """
 
@@ -245,11 +255,13 @@ def _recorded_batch_rel(
     project_root: Path,
     data_root: Path,
 ) -> str | None:
-    """Batch recorded for a raw file: mapping first, legacy 1:1 path as fallback.
+    """Batch proof for a raw file: state mapping first, existing legacy 1:1 batch second.
 
-    The legacy path is returned even when the file is missing so the caller can
-    report ``no_parquet``; a path that cannot be derived at all means there is
-    no mapping to trust (``None``).
+    ``None`` means there is no mapping to trust: state has no entry for this raw
+    path and the historical per-file batch does not exist on disk, so the caller
+    reports ``no_mapping``. A recorded mapping is returned even when its file is
+    missing, so the caller reports ``no_parquet`` instead — there the state does
+    prove the file was normalized, only the batch is gone.
     """
     mapped = batches.get(rel_path)
     if mapped is not None:
@@ -258,7 +270,6 @@ def _recorded_batch_rel(
         rel_path,
         project_root=project_root,
         data_root=data_root,
-        require_exists=False,
     )
 
 

@@ -16,7 +16,7 @@ from unittest import mock
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from datasets import BINANCE_FUTURES
+from datasets import BINANCE_FUTURES, POLYMARKET
 from normalizer import runner
 from normalizer.merged import (
     MERGED_MAX_FILES_PER_BATCH,
@@ -29,6 +29,7 @@ from normalizer.runner import BATCH_MODE_MERGED, BATCH_MODE_PER_FILE, resolve_ba
 from normalizer.state import ProcessedState, load_processed_state, save_processed_state
 from normalizer.tokens import invalidate_polymarket_outcome_batches
 from normalizer.writer import MERGED_ROW_GROUP_SIZE, write_merged_parquet_batch
+from parse_polymarket import OutcomeTokenRegistry
 
 DATE = "2026-08-14"
 SYMBOL = "BTCUSDT"
@@ -124,6 +125,48 @@ def write_raw(
         encoding="utf-8",
     )
     return path
+
+
+PM_METADATA = {
+    "event_type": "new_market",
+    "slug": "btc-updown-15m-1762000000",
+    "condition_id": "0xcondition",
+    "question": "BTC Up or Down 15m?",
+    "end_date": "2026-11-01T12:15:00Z",
+    "yes_token_id": "0xyes-1",
+    "no_token_id": "0xno-1",
+    "timestamp": 1_762_000_000_000,
+}
+
+
+def write_pm_raw(
+    root: Path,
+    category: str,
+    stamp: str,
+    payloads: list[dict[str, object]],
+    *,
+    date: str = DATE,
+) -> Path:
+    path = root / "raw" / POLYMARKET / category / date / f"{stamp}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def pm_price_payload(*, asset_id: str = "0xyes-1", timestamp: int = 1_762_000_001_500) -> dict[str, object]:
+    return {
+        "event_type": "best_bid_ask",
+        "timestamp": timestamp,
+        "asset_id": asset_id,
+        "best_bid": "0.44",
+        "best_ask": "0.46",
+        "spread": "0.02",
+        "price": "0.45",
+        "side": "buy",
+    }
 
 
 def make_project() -> tuple[tempfile.TemporaryDirectory, Path]:
@@ -447,6 +490,111 @@ class MergedBatchCrashRecoveryTests(NormalizerProjectTestCase):
         state = load_processed_state(self.state_path)
         self.assertEqual(state.processed_files, set())
         self.assertEqual(state.batches, {})
+
+
+class PolymarketTokenRegistryPersistenceTests(NormalizerProjectTestCase):
+    """The asset → outcome registry is state: both batch modes must persist it."""
+
+    def _write_metadata(self, stamp: str, **overrides: str) -> Path:
+        payload = dict(PM_METADATA)
+        payload.update(overrides)
+        return write_pm_raw(self.root, "prediction_metadata", stamp, [payload])
+
+    def _write_price(self, stamp: str, *, asset_id: str = "0xyes-1") -> Path:
+        return write_pm_raw(
+            self.root,
+            "prediction_price",
+            stamp,
+            [pm_price_payload(asset_id=asset_id)],
+        )
+
+    def _tokens(self) -> dict[str, str]:
+        payload = json.loads(self.tokens_path.read_text(encoding="utf-8"))
+        return payload["asset_to_outcome"]
+
+    def _blind_seed(self):
+        """Simulate metadata that lands after the registry seed scan of the turn."""
+        return mock.patch(
+            "normalizer.tokens.seed_token_registry_from_raw",
+            return_value=OutcomeTokenRegistry(),
+        )
+
+    def _price_table(self, stamp: str, category: str = "prediction_price") -> pa.Table:
+        path = (
+            self.data_root
+            / category
+            / POLYMARKET
+            / "BTC_15M"
+            / DATE
+            / f"{stamp}.parquet"
+        )
+        return pq.read_table(path)
+
+    def test_per_file_turn_writes_a_mapping_discovered_during_the_batch(self) -> None:
+        self._write_metadata("00-00-00")
+        self._write_price("00-01-00")
+
+        with self._blind_seed():
+            stats = self.run_normalize(BATCH_MODE_PER_FILE)
+
+        self.assertEqual(stats["raw_files_failed"], 0)
+        self.assertEqual(stats["raw_files_processed"], 2)
+        # Before the fix the default path never called save_polymarket_tokens:
+        # the mapping only reached disk on the next turn's seed scan.
+        self.assertEqual(self._tokens(), {"0xno-1": "Down", "0xyes-1": "Up"})
+        self.assertEqual(
+            self._price_table("00-01-00").column("outcome").to_pylist(),
+            ["Up"],
+        )
+
+    def test_per_file_turn_does_not_rewrite_an_unchanged_registry(self) -> None:
+        self._write_metadata("00-00-00")
+        self._write_price("00-01-00")
+        with self._blind_seed():
+            self.run_normalize(BATCH_MODE_PER_FILE)
+        written = self.tokens_path.read_bytes()
+
+        # Same tokens again: the registry does not change, so it must not be rewritten.
+        self._write_metadata("00-02-00")
+        self._write_price("00-03-00")
+        with mock.patch.object(
+            runner,
+            "save_polymarket_tokens",
+            wraps=runner.save_polymarket_tokens,
+        ) as save_mock:
+            stats = self.run_normalize(BATCH_MODE_PER_FILE)
+
+        # 2 new raw files, plus the price batch rewritten once by the token
+        # registry's outcome backfill (the registry file appeared this run).
+        self.assertEqual(stats["raw_files_processed"], 3)
+        self.assertEqual(save_mock.call_count, 0)
+        self.assertEqual(self.tokens_path.read_bytes(), written)
+
+    def test_merged_turn_still_writes_a_new_mapping(self) -> None:
+        self._write_metadata("00-00-00")
+        self._write_price("00-01-00")
+
+        with self._blind_seed():
+            stats = self.run_normalize(BATCH_MODE_MERGED)
+
+        self.assertEqual(stats["raw_files_failed"], 0)
+        self.assertEqual(self._tokens(), {"0xno-1": "Down", "0xyes-1": "Up"})
+
+
+class ProcessedCounterSemanticsTests(NormalizerProjectTestCase):
+    """``parquet_files_processed_total`` counts raw sources, not output files."""
+
+    def test_merged_mode_counts_raw_sources_not_batches(self) -> None:
+        from metrics.pipeline_registry import parquet_files_processed_total
+
+        for index, stamp in enumerate(("00-00-00", "00-01-00", "00-02-00")):
+            write_raw(self.root, "trades", stamp, start_index=index * 10)
+
+        before = parquet_files_processed_total._value.get()
+        stats = self.run_normalize(BATCH_MODE_MERGED)
+
+        self.assertEqual(stats["parquet_batches_written"], 1)
+        self.assertEqual(parquet_files_processed_total._value.get() - before, 3)
 
 
 class MergedWriterTests(unittest.TestCase):

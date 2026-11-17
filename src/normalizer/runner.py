@@ -47,6 +47,7 @@ from normalizer.tokens import (
     prepare_polymarket_token_registry,
 )
 from normalizer.writer import rows_to_arrow, write_merged_parquet_batch
+from parse_polymarket import OutcomeTokenRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -168,29 +169,65 @@ def _persist_processed_state(
     )
 
 
+def _token_snapshot(
+    token_registry: OutcomeTokenRegistry | None,
+    *,
+    exchange: str,
+    category: str,
+) -> dict[str, str] | None:
+    """Registry mapping before a parse, only for files that can change it.
+
+    Only ``prediction_metadata`` rows add asset → outcome entries, so every
+    other category skips the copy and the post-parse comparison.
+    """
+    if token_registry is None or exchange != POLYMARKET:
+        return None
+    if category != "prediction_metadata":
+        return None
+    return token_registry.to_mapping()
+
+
+def _save_tokens_if_changed(
+    *,
+    token_registry: OutcomeTokenRegistry | None,
+    tokens_before: dict[str, str] | None,
+    tokens_path: Path,
+) -> None:
+    """Persist the Polymarket registry when a metadata batch changed it.
+
+    The registry is state, not parquet output, so both batch modes call this:
+    the historical ``per_file`` path used to skip the write and only the merged
+    path persisted it, which delayed a new asset → outcome mapping by one turn.
+    """
+    if token_registry is None or tokens_before is None:
+        return
+    mapping_after = token_registry.to_mapping()
+    if mapping_after != tokens_before:
+        save_polymarket_tokens(tokens_path, mapping_after)
+
+
 def _parse_rows_with_token_sync(
     jsonl_path: Path,
     *,
     exchange: str,
     category: str,
     tokens_path: Path,
-    token_registry: object | None,
+    token_registry: OutcomeTokenRegistry | None,
 ):
     """Parse one raw file, persisting the Polymarket token registry when it changes."""
     registry = token_registry if exchange == POLYMARKET else None
-    mapping_before = registry.to_mapping() if registry is not None else None
+    tokens_before = _token_snapshot(registry, exchange=exchange, category=category)
     rows = parse_jsonl_file(
         jsonl_path,
         exchange=exchange,
         category=category,
         token_registry=registry,
     )
-    if (
-        registry is not None
-        and category == "prediction_metadata"
-        and registry.to_mapping() != mapping_before
-    ):
-        save_polymarket_tokens(tokens_path, registry.to_mapping())
+    _save_tokens_if_changed(
+        token_registry=registry,
+        tokens_before=tokens_before,
+        tokens_path=tokens_path,
+    )
     return rows
 
 
@@ -200,24 +237,38 @@ def _process_per_file_pending(
     should_stop: Callable[[], bool] | None,
     project_root: Path,
     data_root: Path,
-    token_registry: object | None,
+    tokens_path: Path,
+    token_registry: OutcomeTokenRegistry | None,
     state: ProcessedState,
     stats: dict[str, int],
     written_paths: set[Path],
 ) -> bool:
-    """Normalize pending files one-by-one (historical behavior). Returns interrupted."""
+    """Normalize pending files one-by-one (historical behavior). Returns interrupted.
+
+    Parquet output stays byte-identical to the historical writer. The
+    Polymarket token registry is persisted after a metadata file adds a
+    mapping, exactly as in merged mode: it is state, so it must not depend on
+    which writer layout is active.
+    """
     for jsonl_path, rel_path in pending:
         if should_stop is not None and should_stop():
             return True
 
+        exchange = _exchange_for(jsonl_path)
+        category = jsonl_path.parts[-3]
+        registry = token_registry if exchange == POLYMARKET else None
+        tokens_before = _token_snapshot(registry, exchange=exchange, category=category)
         try:
             written_path, row_count = normalize_jsonl_batch(
                 jsonl_path,
                 project_root=project_root,
                 data_root=data_root,
-                token_registry=(
-                    token_registry if _exchange_for(jsonl_path) == POLYMARKET else None
-                ),
+                token_registry=registry,
+            )
+            _save_tokens_if_changed(
+                token_registry=registry,
+                tokens_before=tokens_before,
+                tokens_path=tokens_path,
             )
         except Exception:
             stats["raw_files_failed"] += 1
@@ -248,7 +299,7 @@ def _process_merged_pending(
     project_root: Path,
     data_root: Path,
     tokens_path: Path,
-    token_registry: object | None,
+    token_registry: OutcomeTokenRegistry | None,
     state: ProcessedState,
     stats: dict[str, int],
     written_paths: set[Path],
@@ -352,6 +403,9 @@ def _process_merged_pending(
         stats["raw_files_processed"] += len(included)
         stats["rows_written"] += row_count
         written_paths.add(out_path)
+        # Counts raw source files, not output files: a merged batch covers
+        # every raw file in the chunk while writing one parquet. The metric
+        # name and help text are explicit about that (INFO-2 in review).
         parquet_files_processed_total.inc(len(included))
 
     return False
@@ -539,6 +593,7 @@ def _process_pending(
         should_stop=should_stop,
         project_root=project_root,
         data_root=data_root,
+        tokens_path=tokens_path,
         token_registry=token_registry,
         state=state,
         stats=stats,

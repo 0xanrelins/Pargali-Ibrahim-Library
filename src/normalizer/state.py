@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -162,7 +163,19 @@ def save_processed_state(
 
 
 def save_processed_files(state_path: Path, processed_files: set[str]) -> None:
-    """Persist only the processed set (legacy callers; drops any batch mapping)."""
+    """Deprecated: write only the processed set, erasing every batch mapping.
+
+    ``processed_batches`` is the proof retention trusts before it deletes a raw
+    file, so calling this with a live state file silently drops that proof (and
+    logs nothing). Use :func:`save_processed_state` and pass the mapping
+    alongside ``processed_files``.
+    """
+    warnings.warn(
+        "save_processed_files() drops processed_batches; "
+        "use save_processed_state(state_path, processed_files, batches) instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     save_processed_state(state_path, processed_files, {})
 
 

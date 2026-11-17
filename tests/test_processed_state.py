@@ -229,7 +229,9 @@ class NormalizeOnceStateWriteTests(ProcessedStateTestBase):
         self.assertIn(missing, state)
 
 
-class SaveProcessedFilesAtomicTests(unittest.TestCase):
+class SaveProcessedStateAtomicTests(unittest.TestCase):
+    """Atomic tmp + ``os.replace`` behavior of the state writer (not the wrapper)."""
+
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmpdir.cleanup)
@@ -239,7 +241,7 @@ class SaveProcessedFilesAtomicTests(unittest.TestCase):
         return sorted(path.name for path in self.state_path.parent.iterdir())
 
     def test_failed_write_keeps_previous_state_parseable(self) -> None:
-        save_processed_files(self.state_path, {"raw/a.jsonl"})
+        save_processed_state(self.state_path, {"raw/a.jsonl"}, {})
         before = self.state_path.read_bytes()
 
         with mock.patch(
@@ -247,9 +249,10 @@ class SaveProcessedFilesAtomicTests(unittest.TestCase):
             side_effect=OSError(28, "No space left on device"),
         ):
             with self.assertRaises(OSError):
-                save_processed_files(
+                save_processed_state(
                     self.state_path,
                     {"raw/a.jsonl", "raw/b.jsonl"},
+                    {},
                 )
 
         self.assertEqual(self.state_path.read_bytes(), before)
@@ -260,13 +263,13 @@ class SaveProcessedFilesAtomicTests(unittest.TestCase):
         self.assertEqual(self._dir_entries(), ["processed.json"])
 
     def test_write_replaces_target_atomically_and_leaves_no_tmp_file(self) -> None:
-        save_processed_files(self.state_path, {"raw/a.jsonl"})
+        save_processed_state(self.state_path, {"raw/a.jsonl"}, {})
 
         with mock.patch(
             "normalizer.state.os.replace",
             wraps=os.replace,
         ) as replace_mock:
-            save_processed_files(self.state_path, {"raw/b.jsonl"})
+            save_processed_state(self.state_path, {"raw/b.jsonl"}, {})
 
         self.assertEqual(replace_mock.call_count, 1)
         tmp_path, target_path = replace_mock.call_args.args
@@ -278,6 +281,20 @@ class SaveProcessedFilesAtomicTests(unittest.TestCase):
             {"raw/b.jsonl"},
         )
         self.assertEqual(self._dir_entries(), ["processed.json"])
+
+
+class SaveProcessedFilesDeprecationTests(unittest.TestCase):
+    """The legacy wrapper may not silently drop ``processed_batches`` unnoticed."""
+
+    def test_calling_the_legacy_helper_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "state" / "processed.json"
+
+            with self.assertWarns(DeprecationWarning) as caught:
+                save_processed_files(state_path, {"raw/a.jsonl"})
+
+            self.assertIn("save_processed_state", str(caught.warning))
+            self.assertEqual(load_processed_files(state_path), {"raw/a.jsonl"})
 
 
 class LegacyStateMigrationTests(unittest.TestCase):
