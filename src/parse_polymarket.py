@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from datasets import (
     PolymarketCategory,
     iter_jsonl_paths as dataset_iter_jsonl_paths,
 )
+from json_codec import loads as json_loads
 from polymarket.discovery import is_btc_15m_metadata
 
 logger = logging.getLogger(__name__)
@@ -258,8 +258,8 @@ def parse_polymarket_lines(
         return []
 
     try:
-        payload = json.loads(line)
-    except json.JSONDecodeError as exc:
+        payload = json_loads(line)
+    except ValueError as exc:
         logger.warning("Skipping invalid Polymarket JSON line: %s", exc)
         return []
 

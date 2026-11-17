@@ -5,3 +5,4 @@ pyarrow>=18.0.0
 duckdb>=1.1.0
 prometheus_client>=0.21.0
 websocket-client>=1.8.0
+orjson>=3.9.0

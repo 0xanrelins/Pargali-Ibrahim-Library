@@ -19,7 +19,7 @@ Collector (:9100–9103)
     ↓
 raw/          JSONL batches (kept permanently)
     ↓
-Normalizer (:9101)   DuckDB writer
+Normalizer (:9101)   Arrow/parquet writer
     ↓
 data/         immutable parquet batches (1 JSONL → 1 parquet)
 ```
@@ -42,7 +42,7 @@ Optional future tiers (derived, catalog, agent) live under `archive/tier2/` — 
 | **Binance collector** (`:9100`) | BTCUSDT agg trades + liquidations |
 | **Orderbook collector** (`:9102`) | BTCUSDT depth@100ms + 15 min snapshots |
 | **Polymarket collector** (`:9103`) | BTC 15m Up/Down — direct CLOB WebSocket |
-| **Normalizer** (`:9101`) | raw JSONL → immutable parquet batches (DuckDB writer) |
+| **Normalizer** (`:9101`) | raw JSONL → immutable parquet batches (Arrow writer) |
 | **Monitoring** | 6 Grafana dashboards, Prometheus alerts |
 
 **Symbols:** `BTCUSDT` (Binance), `BTC_15M` (Polymarket)
@@ -142,7 +142,7 @@ cd "/path/to/Pargali-Ibrahim-Library"
 │   ├── collect_orderbook.py / run_orderbook_...   # Orderbook (:9102)
 │   ├── collect_polymarket.py / run_polymarket_...# Polymarket (:9103)
 │   ├── normalize_parquet.py                       # Normalizer CLI (:9101)
-│   ├── normalizer/                                # DuckDB batch writer
+│   ├── normalizer/                                # Arrow/parquet batch writer
 │   ├── rollup_parquet.py                          # Derived hourly + daily rollups
 │   ├── convert_parquet.py                         # Deprecated → normalize_parquet
 │   ├── collectors/                                # Adapter layer
