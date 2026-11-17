@@ -219,8 +219,13 @@ Rules:
   the normalizer filed under that date.
 - **Incremental** — an hourly target is written only when it is missing or older
   than its newest contributing source; a daily is also rebuilt whenever one of its
-  hourly files is rewritten. A second pass writes nothing. `--backfill` ignores
-  freshness and rebuilds the whole layer.
+  hourly files is written or removed. A second pass writes nothing. `--backfill`
+  ignores freshness and rebuilds the whole layer.
+- **Stale hours are removed** — if a re-normalized batch moves every row out of
+  an hour, the old `HH.parquet` is deleted (only names matching the rollup
+  contract are touched) and the daily is rebuilt from the hours this pass
+  actually produces. A planned write that yields zero rows removes its old
+  target too, so `--backfill` repairs a day the incremental pass could not.
 - **Atomic** — `tmp` file in the target directory + `os.replace`; a killed run
   leaves the previous file intact. Output is `ZSTD` parquet.
 - **Same schema as `data/`** — columns are cast to the normalizer contract
@@ -232,17 +237,25 @@ Rules:
   older than its day directory (the normalizer publishes batches with an atomic
   rename, so a new or replaced batch bumps the directory mtime). The rest of
   `data/` is not opened, so discovery does not grow with the full history.
+- **Restored in place** — restoring a batch over its old path while preserving
+  its mtime does not bump the day directory, so the gate can skip that day. Run
+  `--backfill` after an in-place restore.
+- **Empty day dirs** — a day with no usable source never gets a daily, so the
+  gate cannot close it (~1,028 such directories in production). Each costs one
+  `stat` per pass; the effect on a pass is negligible.
 - **Empty vs rejected** — a zero-row batch is normal (a quiet flush interval): it
   is counted as `sources_empty` and ignored. A **non-empty** batch that cannot be
   bucketed (unreadable parquet, missing/non-integer timestamp column, implausible
   epoch, or a span over **two days**) counts as `sources_skipped`; the pass logs
   one summary line with the reasons and exits non-zero. A single batch may span
   at most two days, so normalizer merged mode must never produce a longer one.
-- **No partial day** — if any source of a day is rejected, that day's hourly and
-  daily files are neither written nor rewritten (an existing file stays exactly
-  as it is). That keeps `daily` equal to every row of the day instead of silently
-  publishing an incomplete file. Fix or remove the batch; the next pass fills the
-  day in.
+- **No partial day** — if any source of a day is rejected, that day's daily is
+  neither written nor rewritten (an existing daily stays exactly as it is). That
+  keeps `daily` equal to every row of the day instead of silently publishing an
+  incomplete file. The day's hourly files follow normal retention: outside the
+  `--hourly-days` window the hourly directory may still be pruned once a daily
+  exists, but the daily itself is kept. Fix or remove the batch; the next pass
+  fills the day in.
 - **Derived, not history** — `data/`, `raw/` and `state/` are never written. Delete
   `data_rollup/` and rebuild it at any time:
 

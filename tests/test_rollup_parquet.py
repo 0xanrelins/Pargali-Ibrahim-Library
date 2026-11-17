@@ -717,7 +717,11 @@ class BrokenSourceTest(RollupTestBase):
 
         self.assertEqual(stats.sources_skipped, 1)
         self.assertEqual(stats.failed, 1)
-        self.assertEqual(stats.days_blocked, 0)
+        self.assertEqual(
+            stats.days_blocked,
+            1,
+            "a day with no usable source but a rejected batch is still blocked",
+        )
         self.assertEqual(stats.hourly_failed, 0)
         self.assertEqual(stats.daily_skipped_empty, 0)
         self.assertFalse(self.daily(DAY).exists(), "no source must not create an empty daily")
@@ -889,6 +893,130 @@ class EmptyHourTest(RollupTestBase):
         self.assertEqual(self.snapshot(self.rollup_root), before)
 
 
+class EmptyAndRejectedDayTest(RollupTestBase):
+    def test_empty_plus_rejected_day_still_counts_as_blocked(self) -> None:
+        self.write_empty_batch(DAY, "09-00-00")
+        corrupt = self.write_batch(DAY, "10-00-00", _trade_rows(ts(DAY, 10, 0), 1))
+        corrupt.write_bytes(b"not a parquet file")
+
+        with self.assertLogs("rollup_parquet", level="ERROR") as logs:
+            stats = self.run_pass()
+
+        self.assertEqual(stats.sources_empty, 1)
+        self.assertEqual(stats.sources_skipped, 1)
+        self.assertEqual(stats.days_blocked, 1)
+        self.assertEqual(stats.failed, 1)
+        self.assertTrue(
+            any("1 day(s) blocked" in line for line in logs.output), logs.output
+        )
+        self.assertFalse(self.daily(DAY).exists())
+
+
+class StaleHourlyTest(RollupTestBase):
+    """A re-normalized batch must not leave an hour behind for the daily."""
+
+    def test_batch_moved_to_another_hour_removes_the_old_hour(self) -> None:
+        self.write_batch(DAY, "09-00-00", _trade_rows(ts(DAY, 9, 10), 3))
+        self.run_pass()
+        self.assertEqual(self.count(self.hourly(DAY, 9)), 3)
+        self.assertEqual(self.count(self.daily(DAY)), 3)
+
+        # Same batch path, re-normalized: its three rows now live in hour 10.
+        self.write_batch(DAY, "09-00-00", _trade_rows(ts(DAY, 10, 10), 3))
+
+        stats = self.run_pass()
+
+        self.assertFalse(self.hourly(DAY, 9).exists())
+        self.assertEqual(self.count(self.hourly(DAY, 10)), 3)
+        self.assertEqual(self.count(self.daily(DAY)), 3)
+        self.assertEqual(stats.hourly_stale_deleted, 1)
+        self.assertEqual(stats.daily_written, 1)
+        self.assert_no_temp_files(self.hourly(DAY, 10).parent)
+
+        again = self.run_pass()
+        self.assertEqual(again.hourly_stale_deleted, 0)
+        self.assertEqual(again.hourly_written, 0)
+        self.assertEqual(again.daily_written, 0)
+
+    def test_backfill_removes_a_stale_hour_and_repairs_the_daily(self) -> None:
+        self.write_batch(DAY, "09-00-00", _trade_rows(ts(DAY, 9, 10), 3))
+        self.write_batch(DAY, "10-00-00", _trade_rows(ts(DAY, 10, 10), 2, first_id=3))
+        self.run_pass()
+        self.assertEqual(self.count(self.daily(DAY)), 5)
+
+        # Simulate the regression: the hour-9 source disappears while its
+        # hourly file and the 5-row daily stay behind.
+        (self.day_dir() / "09-00-00.parquet").unlink()
+
+        stats = self.run_pass(backfill=True)
+
+        self.assertFalse(self.hourly(DAY, 9).exists())
+        self.assertTrue(self.hourly(DAY, 10).exists())
+        self.assertEqual(self.count(self.daily(DAY)), 2)
+        self.assertEqual(stats.hourly_stale_deleted, 1)
+        self.assertEqual(stats.daily_written, 1)
+
+    def test_stale_cleanup_only_touches_hh_parquet_names(self) -> None:
+        self.write_batch(DAY, "09-00-00", _trade_rows(ts(DAY, 9, 10), 1))
+        self.write_batch(DAY, "10-00-00", _trade_rows(ts(DAY, 10, 10), 2, first_id=1))
+        self.run_pass()
+        day_dir = self.hourly(DAY, 10).parent
+        hourly_bytes = self.hourly(DAY, 10).read_bytes()
+        foreign = {
+            "notes.parquet": hourly_bytes,
+            "24.parquet": hourly_bytes,
+            "0.parquet": hourly_bytes,
+            "09.parquet.bak": b"backup",
+            "readme.txt": b"hello",
+        }
+        for name, payload in foreign.items():
+            (day_dir / name).write_bytes(payload)
+        (self.day_dir() / "09-00-00.parquet").unlink()
+
+        stats = self.run_pass()
+
+        self.assertFalse(self.hourly(DAY, 9).exists())
+        for name in foreign:
+            self.assertTrue((day_dir / name).exists(), f"{name} must be preserved")
+        self.assertEqual(
+            self.count(self.daily(DAY)),
+            2,
+            "a foreign .parquet in the hourly dir must not leak into the daily",
+        )
+        self.assertEqual(stats.hourly_stale_deleted, 1)
+
+    def test_zero_row_planned_write_removes_its_old_target(self) -> None:
+        merged = "09-00-00--12-00-00.parquet"
+        self.write_named_batch(
+            DAY,
+            merged,
+            _trade_rows(ts(DAY, 9, 10), 1)
+            + _trade_rows(ts(DAY, 11, 10), 2, first_id=1)
+            + _trade_rows(ts(DAY, 12, 10), 1, first_id=3),
+        )
+        self.run_pass()
+        self.assertEqual(self.count(self.hourly(DAY, 11)), 2)
+
+        # Same span (9..12) but no row in hour 11 anymore. Hour 11 stays in
+        # ``group.hours``, so this is a planned write yielding zero rows, not
+        # plan-time stale detection.
+        time.sleep(0.01)
+        self.write_named_batch(
+            DAY,
+            merged,
+            _trade_rows(ts(DAY, 9, 10), 1)
+            + _trade_rows(ts(DAY, 12, 10), 1, first_id=1),
+        )
+
+        stats = self.run_pass()
+
+        self.assertFalse(self.hourly(DAY, 11).exists())
+        self.assertEqual(stats.hourly_stale_deleted, 0)
+        self.assertEqual(stats.hourly_empty_targets_deleted, 1)
+        self.assertEqual(self.count(self.daily(DAY)), 2)
+        self.assert_no_temp_files(self.hourly(DAY, 9).parent)
+
+
 class DiscoveryGateTest(RollupTestBase):
     def _policy(self, window_start: date = DAY, *, backfill: bool = False) -> DiscoveryPolicy:
         return DiscoveryPolicy(
@@ -943,6 +1071,31 @@ class DiscoveryGateTest(RollupTestBase):
 
         stats = self.run_pass(hourly_days=1)
 
+        self.assertEqual(stats.daily_written, 1)
+        self.assertEqual(self.count(self.daily(OLD_DAY)), 4)
+
+    def test_late_batch_without_utime_invalidates_the_daily(self) -> None:
+        self.write_batch(OLD_DAY, "09-00-10", _trade_rows(ts(OLD_DAY, 9, 0, 10), 2))
+        self.run_pass(hourly_days=1)
+        self.assertEqual(self.count(self.daily(OLD_DAY)), 2)
+
+        # Only a real file write: no utime, no mark_stale. The new file bumps
+        # the day directory mtime and is newer than the daily by itself.
+        time.sleep(0.01)
+        self.write_batch(
+            OLD_DAY, "10-30-00", _trade_rows(ts(OLD_DAY, 10, 30), 2, first_id=2)
+        )
+
+        counters = DiscoveryCounters()
+        groups = discover_day_groups(
+            self.data_root, policy=self._policy(), counters=counters
+        )
+        self.assertEqual([group.day for group in groups], [OLD_DAY])
+        self.assertEqual(counters.days_scanned, 1)
+
+        stats = self.run_pass(hourly_days=1)
+
+        self.assertEqual(stats.hourly_written, 2)
         self.assertEqual(stats.daily_written, 1)
         self.assertEqual(self.count(self.daily(OLD_DAY)), 4)
 

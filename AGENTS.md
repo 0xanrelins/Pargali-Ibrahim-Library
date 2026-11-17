@@ -91,7 +91,14 @@ than its day directory; the rest of `data/` is not scanned. A single batch may
 span at most two days — normalizer merged mode must not produce a longer one.
 A zero-row batch is normal and counted separately (`sources_empty`); any other
 unbucketable batch fails the pass (exit 1), and a day with such a batch is not
-rolled up at all so its daily never silently loses rows.
+rolled up at all so its daily never silently loses rows (its hourly directory
+may still be pruned by the normal `--hourly-days` retention). Stale hourly files
+— an hour the day's sources no longer produce — are removed and the daily is
+rebuilt from the current hour set; a zero-row planned write removes its old
+target too. Restoring batches in place with their mtime preserved can make the
+discovery gate skip that day, so run `--backfill` afterwards. Empty day dirs
+never get a daily, so the gate keeps scanning them (~1,028 in production); the
+cost is one `stat` per day.
 
 Registry: `src/datasets.py` — add new sources/categories here first.
 

@@ -38,6 +38,12 @@ batch fails the pass (non-zero exit) and blocks **every** rollup of its day, so
 a daily file is never published with rows silently missing. The previous files
 of a blocked day are left untouched.
 
+An hourly file whose hour is no longer produced by the day's sources is
+removed, and a planned write that yields zero rows removes its old target, so a
+re-normalized batch cannot leave a stale hour behind for the daily to pick up.
+The daily is merged from the hour buckets of the current pass, never from a
+directory scan.
+
 Every output is derived: delete ``data_rollup/`` and rebuild it with
 ``--backfill`` (or let ``--run`` rebuild it incrementally). Losing it is not
 data loss.
@@ -48,10 +54,11 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shutil
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as day_time, timedelta, timezone
 from pathlib import Path
@@ -199,12 +206,14 @@ class HourlyTask:
 
 @dataclass(frozen=True)
 class DailyTask:
-    """One daily rollup to write; its hourly sources are read from disk.
+    """One daily rollup to write, merged from the day's live hourly files.
 
-    ``force`` means the daily is missing or older than its newest source and
-    must be written even if no hourly file changed in this pass. Without it,
-    the daily is only rebuilt when an hourly rollup of the day was actually
-    written (a planned hourly write can turn out to have zero rows).
+    ``hours`` is the set of hour buckets the day's current sources produce;
+    only those files are merged, so a stale ``HH.parquet`` left in the
+    directory can never leak into the daily. ``force`` means the daily is
+    missing or older than its newest source and must be written even if this
+    pass did not change any hourly file. Without it, the daily is only rebuilt
+    when this pass changed the day's hourly layer (wrote or removed a file).
     """
 
     category: str
@@ -213,7 +222,20 @@ class DailyTask:
     day: date
     target: Path
     hourly_dir: Path
+    hours: tuple[int, ...] = ()
     force: bool = False
+
+
+@dataclass(frozen=True)
+class StaleHourly:
+    """An hourly rollup whose hour no longer has any source row."""
+
+    category: str
+    exchange: str
+    symbol: str
+    day: date
+    hour: int
+    target: Path
 
 
 @dataclass
@@ -222,6 +244,7 @@ class RollupPlan:
 
     hourly_tasks: list[HourlyTask] = field(default_factory=list)
     daily_tasks: list[DailyTask] = field(default_factory=list)
+    stale_hourly: list[StaleHourly] = field(default_factory=list)
     prune_dirs: list[Path] = field(default_factory=list)
     prune_before: date | None = None
     hours_skipped_fresh: int = 0
@@ -234,6 +257,7 @@ class RollupPlan:
         return {
             "hourly_to_write": len(self.hourly_tasks),
             "daily_to_write": len(self.daily_tasks),
+            "hourly_stale_to_delete": len(self.stale_hourly),
             # Plan-time preview: a pass can add transient day dirs it prunes again.
             "hourly_dirs_pending_prune": len(self.prune_dirs),
             "hours_skipped_fresh": self.hours_skipped_fresh,
@@ -250,6 +274,8 @@ class RollupStats:
 
     hourly_written: int = 0
     hourly_empty_skipped: int = 0
+    hourly_stale_deleted: int = 0
+    hourly_empty_targets_deleted: int = 0
     hourly_failed: int = 0
     hourly_rows: int = 0
     hourly_bytes: int = 0
@@ -259,6 +285,7 @@ class RollupStats:
     daily_bytes: int = 0
     daily_skipped_empty: int = 0
     daily_skipped_unchanged: int = 0
+    daily_empty_targets_deleted: int = 0
     sources_empty: int = 0
     sources_skipped: int = 0
     sources_scanned: int = 0
@@ -277,6 +304,8 @@ class RollupStats:
         return {
             "hourly_written": self.hourly_written,
             "hourly_empty_skipped": self.hourly_empty_skipped,
+            "hourly_stale_deleted": self.hourly_stale_deleted,
+            "hourly_empty_targets_deleted": self.hourly_empty_targets_deleted,
             "hourly_failed": self.hourly_failed,
             "hourly_rows": self.hourly_rows,
             "hourly_bytes": self.hourly_bytes,
@@ -286,6 +315,7 @@ class RollupStats:
             "daily_bytes": self.daily_bytes,
             "daily_skipped_empty": self.daily_skipped_empty,
             "daily_skipped_unchanged": self.daily_skipped_unchanged,
+            "daily_empty_targets_deleted": self.daily_empty_targets_deleted,
             "sources_empty": self.sources_empty,
             "sources_skipped": self.sources_skipped,
             "sources_scanned": self.sources_scanned,
@@ -350,6 +380,19 @@ def daily_rollup_path(
         / symbol
         / f"{day.isoformat()}.parquet"
     )
+
+
+def hourly_day_dir(
+    rollup_root: Path,
+    category: str,
+    exchange: str,
+    symbol: str,
+    day: date,
+) -> Path:
+    """The ``hourly/.../{day}/`` directory that holds the day's ``HH.parquet``."""
+    return hourly_rollup_path(
+        rollup_root, category, exchange, symbol, day, 0
+    ).parent
 
 
 def _iter_subdirs(path: Path) -> list[Path]:
@@ -637,9 +680,11 @@ def discover_day_groups(
 ) -> list[DayGroup]:
     """Every (category, exchange, symbol, day) that has at least one usable batch.
 
-    With a ``policy``, only day directories the policy allows are opened; the
-    rest are skipped outright (``counters.days_gated_out``), so an unchanged
-    history costs one ``stat`` per day instead of one footer read per file.
+    A day whose only non-empty batches were rejected is included with zero
+    usable sources, so it still counts as blocked. With a ``policy``, only day
+    directories the policy allows are opened; the rest are skipped outright
+    (``counters.days_gated_out``), so an unchanged history costs one ``stat``
+    per day instead of one footer read per file.
     """
     groups: list[DayGroup] = []
     for category in sorted(CATEGORY_SPECS):
@@ -679,7 +724,11 @@ def discover_day_groups(
                     )
                     if skipped is not None:
                         skipped.extend(rejected)
-                    if not sources:
+                    if not sources and not rejected:
+                        # Every batch was empty: nothing to roll up. A day whose
+                        # only non-empty batches were rejected still becomes a
+                        # group so it counts as blocked even without a usable
+                        # source.
                         continue
                     groups.append(
                         DayGroup(
@@ -695,18 +744,33 @@ def discover_day_groups(
     return groups
 
 
-def _hourly_sources_for_day(day_dir: Path) -> list[Path]:
-    """The hourly rollup files of one day, in hour order (temp files excluded)."""
-    if not day_dir.is_dir():
+_HOURLY_FILE_NAME = re.compile(r"^(\d{2})\.parquet$")
+
+
+def stale_hourly_targets(
+    hourly_dir: Path, *, live_hours: Collection[int]
+) -> list[tuple[int, Path]]:
+    """``HH.parquet`` files whose hour is no longer produced by the sources.
+
+    Only names matching the rollup contract (two digits + ``.parquet``, hour
+    0..23) are considered, so a foreign file in the directory is never touched.
+    The caller decides whether the hour may be removed; an hour that is still
+    open keeps its file.
+    """
+    if not hourly_dir.is_dir():
         return []
-    return sorted(
-        (
-            entry
-            for entry in day_dir.iterdir()
-            if entry.is_file() and entry.suffix == ".parquet"
-        ),
-        key=lambda entry: entry.name,
-    )
+    stale: list[tuple[int, Path]] = []
+    for entry in sorted(hourly_dir.iterdir(), key=lambda item: item.name):
+        if not entry.is_file():
+            continue
+        match = _HOURLY_FILE_NAME.match(entry.name)
+        if match is None:
+            continue
+        hour = int(match.group(1))
+        if hour > 23 or hour in live_hours:
+            continue
+        stale.append((hour, entry))
+    return stale
 
 
 # --------------------------------------------------------------------------- #
@@ -844,6 +908,31 @@ def _plan_group(
     daily_target = daily_rollup_path(
         rollup_root, group.category, group.exchange, group.symbol, group.day
     )
+    hourly_dir = hourly_day_dir(
+        rollup_root, group.category, group.exchange, group.symbol, group.day
+    )
+
+    # A re-normalized batch can move every row of an hour somewhere else. That
+    # hour then disappears from ``group.hours`` and no task is produced for it,
+    # so an old ``HH.parquet`` would stay on disk and leak into the daily.
+    # Plan its removal explicitly; only closed hours are touched so an hour
+    # that can still gain rows is left alone.
+    live_hours = set(group.hours)
+    stale_here: list[StaleHourly] = []
+    for hour, target in stale_hourly_targets(hourly_dir, live_hours=live_hours):
+        if not hour_is_closed(group.day, hour, now=now, margin_minutes=margin_minutes):
+            continue
+        stale_here.append(
+            StaleHourly(
+                category=group.category,
+                exchange=group.exchange,
+                symbol=group.symbol,
+                day=group.day,
+                hour=hour,
+                target=target,
+            )
+        )
+    plan.stale_hourly.extend(stale_here)
 
     newest_source = group.newest_mtime()
     daily_stale = backfill or not _target_is_fresh(daily_target, newest_source)
@@ -886,12 +975,14 @@ def _plan_group(
     if not closed:
         plan.days_skipped_open += 1
         return
-    if not (daily_stale or hourly_tasks):
+    if not (daily_stale or hourly_tasks or stale_here):
         plan.days_skipped_fresh += 1
         return
 
     # The daily layer is the merge of the day's hourly files, so it must be
-    # rewritten whenever an hourly file was (or is about to be) rewritten.
+    # rewritten whenever this pass wrote, removed, or emptied an hourly file.
+    # Only the hours of the current source set are merged, never every parquet
+    # file lying in the directory.
     plan.daily_tasks.append(
         DailyTask(
             category=group.category,
@@ -899,9 +990,8 @@ def _plan_group(
             symbol=group.symbol,
             day=group.day,
             target=daily_target,
-            hourly_dir=hourly_rollup_path(
-                rollup_root, group.category, group.exchange, group.symbol, group.day, 0
-            ).parent,
+            hourly_dir=hourly_dir,
+            hours=tuple(sorted(group.hours)),
             force=daily_stale,
         )
     )
@@ -1026,11 +1116,30 @@ def source_select_sql(
 
 @dataclass(frozen=True)
 class WriteResult:
-    """One COPY attempt: how many rows it produced and whether it was published."""
+    """One COPY attempt: rows produced, whether it was published, target removed."""
 
     rows: int
     size_bytes: int
     written: bool
+    removed: bool = False
+
+
+def _remove_target(path: Path) -> bool:
+    """Remove one rollup file atomically; never touches a foreign name.
+
+    The file is renamed to a hidden ``.tmp`` sibling first, so a reader never
+    observes a half-removed target and an interrupted pass leaves a stale temp
+    file that ``cleanup_stale_temp_files`` collects later.
+    """
+    if not path.is_file():
+        return False
+    tmp_path = path.with_name(f".{path.stem}.{os.getpid()}.deleted.tmp")
+    try:
+        os.replace(path, tmp_path)
+    except FileNotFoundError:
+        return False
+    tmp_path.unlink(missing_ok=True)
+    return True
 
 
 def copy_to_parquet(
@@ -1039,6 +1148,7 @@ def copy_to_parquet(
     select_sql: str,
     target: Path,
     skip_empty: bool = False,
+    drop_empty_target: bool = False,
 ) -> WriteResult:
     """``COPY (select_sql)`` into a sibling tmp file, then publish it atomically.
 
@@ -1047,7 +1157,9 @@ def copy_to_parquet(
     pick up. With ``skip_empty`` a zero-row result is discarded along with its
     tmp file instead of publishing an empty parquet: a wide source span can
     cover an hour that simply has no rows, and that hour must not appear as an
-    output file. The previous target, if any, is left untouched.
+    output file. With ``drop_empty_target`` the previous target, if any, is
+    removed too: a file left from an earlier pass would otherwise keep rows
+    this pass proves are gone.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = target.with_name(f".{target.stem}.{os.getpid()}.tmp")
@@ -1060,7 +1172,10 @@ def copy_to_parquet(
         rows = int(result[0]) if result else 0
         if skip_empty and rows == 0:
             tmp_path.unlink(missing_ok=True)
-            return WriteResult(rows=0, size_bytes=0, written=False)
+            removed = drop_empty_target and _remove_target(target)
+            return WriteResult(
+                rows=0, size_bytes=0, written=False, removed=removed
+            )
         size = tmp_path.stat().st_size
         os.replace(tmp_path, target)
         return WriteResult(rows=rows, size_bytes=size, written=True)
@@ -1105,10 +1220,18 @@ class RollupBuilder:
             select_sql=source_select_sql(task.category, task.sources, hour=task.hour),
             target=task.target,
             skip_empty=True,
+            drop_empty_target=True,
         )
 
     def build_daily(self, task: DailyTask) -> WriteResult | None:
-        sources = _hourly_sources_for_day(task.hourly_dir)
+        # Merge exactly the hours this pass says the day produces. A directory
+        # scan would also pick up a stale or foreign parquet, reintroducing the
+        # rows the plan just removed.
+        sources = [
+            path
+            for hour in task.hours
+            if (path := task.hourly_dir / f"{hour:02d}.parquet").is_file()
+        ]
         if not sources:
             logger.warning(
                 "Skipping daily rollup without hourly sources: %s", task.target
@@ -1127,6 +1250,7 @@ class RollupBuilder:
             select_sql=source_select_sql(task.category, sources),
             target=task.target,
             skip_empty=True,
+            drop_empty_target=True,
         )
 
     def close(self) -> None:
@@ -1252,6 +1376,12 @@ def run_rollup(
     )
 
     if dry_run:
+        for stale in plan.stale_hourly:
+            logger.debug(
+                "would remove stale hourly %s (hour %02d has no source rows)",
+                stale.target,
+                stale.hour,
+            )
         for task in plan.hourly_tasks:
             logger.debug("would write %s (%d source file(s))", task.target, len(task.sources))
         for task in plan.daily_tasks:
@@ -1270,8 +1400,29 @@ def run_rollup(
         )
 
     builder = RollupBuilder(rollup_root=output_root, threads=threads)
-    hourly_written_days: set[tuple[str, str, str, date]] = set()
+    hourly_changed_days: set[tuple[str, str, str, date]] = set()
     try:
+        # Remove stale hourly files before writing anything: the daily merge
+        # must never see a file the current sources no longer produce.
+        for stale in plan.stale_hourly:
+            key = (stale.category, stale.exchange, stale.symbol, stale.day)
+            try:
+                removed = _remove_target(stale.target)
+            except OSError:
+                stats.hourly_failed += 1
+                logger.exception(
+                    "Failed to remove stale hourly rollup: %s", stale.target
+                )
+                continue
+            if not removed:
+                continue
+            stats.hourly_stale_deleted += 1
+            hourly_changed_days.add(key)
+            logger.info(
+                "Removed stale hourly rollup: %s (hour %02d has no source rows)",
+                stale.target,
+                stale.hour,
+            )
         for task in plan.hourly_tasks:
             try:
                 result = builder.build_hourly(task)
@@ -1281,13 +1432,22 @@ def run_rollup(
                 continue
             if not result.written:
                 stats.hourly_empty_skipped += 1
-                logger.debug(
-                    "hourly %s has no rows in hour %02d; no file written",
-                    task.day.isoformat(),
-                    task.hour,
-                )
+                if result.removed:
+                    stats.hourly_empty_targets_deleted += 1
+                    hourly_changed_days.add(
+                        (task.category, task.exchange, task.symbol, task.day)
+                    )
+                    logger.info(
+                        "Removed hourly rollup with no source rows: %s", task.target
+                    )
+                else:
+                    logger.debug(
+                        "hourly %s has no rows in hour %02d; no file written",
+                        task.day.isoformat(),
+                        task.hour,
+                    )
                 continue
-            hourly_written_days.add(
+            hourly_changed_days.add(
                 (task.category, task.exchange, task.symbol, task.day)
             )
             stats.hourly_written += 1
@@ -1303,7 +1463,7 @@ def run_rollup(
                 )
         for task in plan.daily_tasks:
             key = (task.category, task.exchange, task.symbol, task.day)
-            if not task.force and key not in hourly_written_days:
+            if not task.force and key not in hourly_changed_days:
                 # Planned only because an hourly file was about to be rewritten;
                 # every such write turned out empty, so the daily is unchanged.
                 stats.daily_skipped_unchanged += 1
@@ -1316,6 +1476,11 @@ def run_rollup(
                 continue
             if result is None or not result.written:
                 stats.daily_skipped_empty += 1
+                if result is not None and result.removed:
+                    stats.daily_empty_targets_deleted += 1
+                    logger.info(
+                        "Removed daily rollup with no source rows: %s", task.target
+                    )
                 continue
             stats.daily_written += 1
             stats.daily_rows += result.rows
