@@ -189,7 +189,11 @@ files into the merged hourly layout without touching the sources:
 ```
 
 One output per hour of the file stamps; rows and columns keep source file order
-(no sort). The command is a dry run unless `--apply` is passed:
+(no sort). `<source-root>` is the directory whose direct children are the
+category directories (for example `trades/`); it is not a parent folder that
+wraps several separate archives. Run the tool once per such root, reusing the
+same `--out` if the outputs belong together. The command is a dry run unless
+`--apply` is passed:
 
 ```bash
 ./venv/bin/python scripts/merge_archive_hourly.py "<source-root>" --out "<out-root>"          # preview

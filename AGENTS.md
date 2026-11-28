@@ -78,10 +78,12 @@ data_rollup/daily/{category}/{exchange}/{symbol}/{date}.parquet         # derive
 ```
 
 `scripts/merge_archive_hourly.py` can consolidate an existing per-minute archive
-into the merged hourly layout under a separate `--out` root. It is an archive
-migration, not the normalizer or the derived rollup layer: the default is a dry
-run, sources are read-only, outputs are verified against their source row counts
-before publication, and valid existing outputs are reused. See `README.md`
+into the merged hourly layout under a separate `--out` root. Point it at the
+directory whose direct children are the category directories, not a parent that
+wraps several archives. It is an archive migration, not the normalizer or the
+derived rollup layer: the default is a dry run, sources are read-only, outputs
+are verified against their source row counts before publication, and valid
+existing outputs are reused. See `README.md`
 (*One-off hourly merge of a per-minute archive*).
 
 `data_rollup/` is a **derived read layer** built by `src/rollup_parquet.py` — never
