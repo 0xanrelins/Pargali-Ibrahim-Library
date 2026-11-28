@@ -118,6 +118,8 @@ Normalizer state lives in `state/processed.json` (version 2): `processed_files` 
 
 Raw-file order and row order are preserved. A file that fails to parse is left out (and retried next turn); it never causes a partial batch to be published with a misleading source list. Parquet footer metadata (`normalizer.raw_sources`) lets the next turn adopt a batch that was published before a crash prevented the state write, without overwriting or duplicating rows. Row groups are capped at 100k rows for predicate pushdown. `src/rollup_parquet.py` only recognizes `HH-MM-SS.parquet`, so merged batches are invisible to the derived rollup layer until it learns the merged name — keep the default mode until that follow-up ships.
 
+The loop interval is set by `NORMALIZE_INTERVAL_SEC` in seconds (default 300, maximum 604800 = 7 days); an empty or whitespace value means the default. `NORMALIZE_SLEEP_MODE=interval` (default) sleeps that interval after each turn; `NORMALIZE_SLEEP_MODE=hour` sleeps until 5 seconds past the next UTC hour boundary instead, so with `NORMALIZE_BATCH_MODE=merged` one file covers each clock hour.
+
 **Never run two processes on `:9101`** (old converter loop + normalizer loop).
 
 ### Raw retention (optional, v1)
