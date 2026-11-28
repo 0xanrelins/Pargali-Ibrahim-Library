@@ -25,7 +25,15 @@ from normalizer.merged import (
     merged_batch_stamps,
     read_merged_sources,
 )
-from normalizer.runner import BATCH_MODE_MERGED, BATCH_MODE_PER_FILE, resolve_batch_mode
+from normalizer.runner import (
+    BATCH_MODE_MERGED,
+    BATCH_MODE_PER_FILE,
+    DEFAULT_NORMALIZE_INTERVAL_SEC,
+    INTERVAL_ENV,
+    MAX_NORMALIZE_INTERVAL_SEC,
+    resolve_batch_mode,
+    resolve_interval_sec,
+)
 from normalizer.state import ProcessedState, load_processed_state, save_processed_state
 from normalizer.tokens import invalidate_polymarket_outcome_batches
 from normalizer.writer import MERGED_ROW_GROUP_SIZE, write_merged_parquet_batch
@@ -227,11 +235,34 @@ class BatchModeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_batch_mode({"NORMALIZE_BATCH_MODE": "auto"})
 
-    def test_normalize_interval_is_five_minutes(self) -> None:
-        import normalize_parquet as cli
 
-        self.assertEqual(runner.NORMALIZE_INTERVAL_SEC, 300)
-        self.assertIs(cli.NORMALIZE_INTERVAL_SEC, runner.NORMALIZE_INTERVAL_SEC)
+class IntervalTests(unittest.TestCase):
+    def test_default_is_five_minutes(self) -> None:
+        self.assertEqual(resolve_interval_sec({}), DEFAULT_NORMALIZE_INTERVAL_SEC)
+        self.assertEqual(DEFAULT_NORMALIZE_INTERVAL_SEC, 300)
+        self.assertEqual(runner.NORMALIZE_INTERVAL_SEC, DEFAULT_NORMALIZE_INTERVAL_SEC)
+
+    def test_valid_value_is_returned(self) -> None:
+        self.assertEqual(resolve_interval_sec({INTERVAL_ENV: "3600"}), 3600)
+        self.assertEqual(resolve_interval_sec({INTERVAL_ENV: " 0.5 "}), 0.5)
+
+    def test_invalid_values_fail_loudly(self) -> None:
+        for value in (
+            "0",
+            "-5",
+            "abc",
+            "",
+            "   ",
+            "nan",
+            "inf",
+            str(MAX_NORMALIZE_INTERVAL_SEC + 1),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as raised:
+                    resolve_interval_sec({INTERVAL_ENV: value})
+                message = str(raised.exception)
+                self.assertIn(INTERVAL_ENV, message)
+                self.assertIn(repr(value), message)
 
     def test_loop_sleeps_for_the_configured_interval(self) -> None:
         import normalize_parquet as cli
@@ -246,6 +277,7 @@ class BatchModeTests(unittest.TestCase):
 
         poller = mock.Mock()
         with (
+            mock.patch.dict(os.environ, {INTERVAL_ENV: "900"}, clear=False),
             mock.patch.object(cli, "normalize_once", return_value={}),
             mock.patch.object(cli, "log_stats"),
             mock.patch.object(cli, "start_exporter"),
@@ -260,7 +292,21 @@ class BatchModeTests(unittest.TestCase):
                 cli.stop_requested = False
 
         poller.stop.assert_called_once()
-        self.assertEqual(sleeps, [runner.NORMALIZE_INTERVAL_SEC])
+        self.assertEqual(sleeps, [900])
+
+    def test_loop_rejects_an_invalid_interval_before_touching_data(self) -> None:
+        import normalize_parquet as cli
+
+        from normalizer.raw_retention import RawRetentionConfig
+
+        with (
+            mock.patch.dict(os.environ, {INTERVAL_ENV: "0"}, clear=False),
+            mock.patch.object(cli, "project_paths") as project_paths,
+            self.assertRaises(ValueError),
+        ):
+            cli.run_loop(retention_config=RawRetentionConfig())
+
+        project_paths.assert_not_called()
 
 
 class MergedBatchEndToEndTests(NormalizerProjectTestCase):

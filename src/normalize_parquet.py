@@ -17,7 +17,11 @@ from normalizer.raw_retention import (
     RawRetentionConfig,
     RawRetentionScheduler,
 )
-from normalizer.runner import NORMALIZE_INTERVAL_SEC, normalize_once, resolve_batch_mode
+from normalizer.runner import (
+    normalize_once,
+    resolve_batch_mode,
+    resolve_interval_sec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,9 @@ def sleep_until_stop(seconds: float) -> None:
 def run_loop(*, retention_config: RawRetentionConfig) -> None:
     global stop_requested
 
+    interval_sec = resolve_interval_sec()
+    batch_mode = resolve_batch_mode()
+
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
@@ -71,8 +78,8 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
         )
     logger.info(
         "Starting normalizer loop (interval=%ss, batch_mode=%s)",
-        NORMALIZE_INTERVAL_SEC,
-        resolve_batch_mode(),
+        interval_sec,
+        batch_mode,
     )
 
     try:
@@ -87,8 +94,8 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
             if stop_requested:
                 break
 
-            logger.info("Next normalize batch in %s seconds", NORMALIZE_INTERVAL_SEC)
-            sleep_until_stop(NORMALIZE_INTERVAL_SEC)
+            logger.info("Next normalize batch in %s seconds", interval_sec)
+            sleep_until_stop(interval_sec)
     finally:
         storage_poller.stop()
 
@@ -154,9 +161,11 @@ def main() -> int:
 
     parser = build_parser()
     args = parser.parse_args()
-    # Validate NORMALIZE_BATCH_MODE before touching any data: an unknown value
-    # must fail loudly at startup, never silently pick a mode.
+    # Validate NORMALIZE_BATCH_MODE and NORMALIZE_INTERVAL_SEC before touching
+    # any data: an unknown value must fail loudly at startup, never silently
+    # pick a mode or interval.
     resolve_batch_mode()
+    resolve_interval_sec()
     retention_config = retention_config_from_args(args)
 
     if args.loop:

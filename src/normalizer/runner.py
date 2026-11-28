@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from collections.abc import Callable, Mapping
@@ -56,7 +57,14 @@ logger = logging.getLogger(__name__)
 # that lands in ~1-minute files; 300 s (the storage-metrics cadence) keeps
 # backlog latency at a few minutes while cutting the fixed cost 5x, and gives
 # each turn enough files to make merged batches worthwhile.
-NORMALIZE_INTERVAL_SEC = 300
+DEFAULT_NORMALIZE_INTERVAL_SEC = 300.0
+# Backward-compatible alias for callers that still import the old constant.
+NORMALIZE_INTERVAL_SEC = DEFAULT_NORMALIZE_INTERVAL_SEC
+
+INTERVAL_ENV = "NORMALIZE_INTERVAL_SEC"
+# A week is generous for a deployment cadence and still rejects unit mistakes
+# such as milliseconds (3600000) that would otherwise stall normalization.
+MAX_NORMALIZE_INTERVAL_SEC = 7 * 24 * 60 * 60
 
 BATCH_MODE_ENV = "NORMALIZE_BATCH_MODE"
 BATCH_MODE_PER_FILE = "per_file"
@@ -75,6 +83,24 @@ def resolve_batch_mode(environ: Mapping[str, str] | None = None) -> str:
         raise ValueError(
             f"{BATCH_MODE_ENV} must be one of {BATCH_MODES}, got {raw_value!r}"
         )
+    return value
+
+
+def resolve_interval_sec(environ: Mapping[str, str] | None = None) -> float:
+    """Read ``NORMALIZE_INTERVAL_SEC``; missing means the historical five-minute loop."""
+    raw_value = (environ if environ is not None else os.environ).get(INTERVAL_ENV)
+    if raw_value is None:
+        return DEFAULT_NORMALIZE_INTERVAL_SEC
+    message = (
+        f"{INTERVAL_ENV} must be a positive number of seconds up to "
+        f"{MAX_NORMALIZE_INTERVAL_SEC}, got {raw_value!r}"
+    )
+    try:
+        value = float(raw_value)
+    except ValueError:
+        raise ValueError(message) from None
+    if not math.isfinite(value) or not 0 < value <= MAX_NORMALIZE_INTERVAL_SEC:
+        raise ValueError(message)
     return value
 
 
