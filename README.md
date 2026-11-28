@@ -127,6 +127,8 @@ cd "/path/to/Pargali-Ibrahim-Library"
 | Rollup rebuild (all history) | `./venv/bin/python src/rollup_parquet.py --backfill` |
 | Rollup preview (no writes) | `./venv/bin/python src/rollup_parquet.py --run --dry-run` |
 | Rollup hourly retention | add `--hourly-days 7` (default), `D` for the window |
+| Archive hourly merge (preview) | `./venv/bin/python scripts/merge_archive_hourly.py "<source-root>" --out "<out-root>"` |
+| Archive hourly merge (write) | `./venv/bin/python scripts/merge_archive_hourly.py "<source-root>" --out "<out-root>" --apply` |
 | Metrics | `curl -s localhost:9100/metrics \| head` (also `:9101`, `:9102`, `:9103`) |
 | Recreate Grafana | `cd monitoring && docker compose up -d grafana --force-recreate` |
 | Stop monitoring | `cd monitoring && docker compose down` |
@@ -149,6 +151,8 @@ cd "/path/to/Pargali-Ibrahim-Library"
 │   ├── collectors/                                # Adapter layer
 │   ├── metrics/                                   # Prometheus registries
 │   ├── archive/tier2/                             # derived, catalog, agent (not run)
+├── scripts/
+│   └── merge_archive_hourly.py                    # One-off per-minute → hourly archive merge
 ├── raw/                     # JSONL (gitignored)
 ├── data/                    # Parquet (gitignored, source of truth)
 ├── data_rollup/             # Derived rollups (gitignored, regenerable)
@@ -173,6 +177,41 @@ data/{category}/{exchange}/{symbol}/{date}/{first}--{last}.parquet
 `first`/`last` are the `HH-MM-SS` stamps of the first and last raw file in the file, so a name is readable and cannot collide with a per-file batch name (`--` separator). A turn larger than 64 raw files is split into deterministic chunks; a crash between writing the parquet and saving state is recovered on the next turn from the file's footer (`normalizer.raw_sources`) instead of rewriting or duplicating rows. Merged files use `row_group_size=100000` so DuckDB predicate pushdown on `timestamp` keeps working. The normalizer never overwrites an existing batch: a name collision with a different source set is logged as an error and the raw files stay unprocessed.
 
 > **Rollup caveat:** `src/rollup_parquet.py` only recognizes `HH-MM-SS.parquet` source names, so it ignores merged batches until the rollup scanner learns the merged name. That is why merged mode is opt-in and off by default; `data/` itself stays complete.
+
+### One-off hourly merge of a per-minute archive
+
+`scripts/merge_archive_hourly.py` consolidates an existing archive of per-minute
+files into the merged hourly layout without touching the sources:
+
+```
+<source>/<category>/<exchange>/<symbol>/<date>/<HH-MM-SS>.parquet
+  -> <out>/<category>/<exchange>/<symbol>/<date>/<first>--<last>.parquet
+```
+
+One output per hour of the file stamps; rows and columns keep source file order
+(no sort). The command is a dry run unless `--apply` is passed:
+
+```bash
+./venv/bin/python scripts/merge_archive_hourly.py "<source-root>" --out "<out-root>"          # preview
+./venv/bin/python scripts/merge_archive_hourly.py "<source-root>" --out "<out-root>" --apply  # write
+```
+
+- Sources are read-only; the output must be a separate root (overlap is refused).
+- Outputs are written atomically with DuckDB `COPY`, ZSTD compression and row
+  groups capped at `MERGED_ROW_GROUP_SIZE`. Existing valid outputs are reused, so
+  a second run is a no-op. An output whose row count, schema or recorded source
+  set no longer matches is left untouched and stops the run; the tool never
+  creates a second file for the same hour.
+- Every output is verified against the sum of its sources before it is published.
+  Zero-row sources contribute zero rows; an all-empty hour still produces a valid
+  empty parquet file.
+- `normalizer.raw_sources` footer metadata records the source files; per-output
+  rows, sources and `timestamp`/`event_time` bounds are recorded in
+  `_merge_report.jsonl` under the output root.
+- Progress is one line per completed hour; the final `SUMMARY` line reports days,
+  hours, files in/out, bytes in/out and failures.
+
+This is an archive migration, not the derived `data_rollup/` layer below.
 
 **Legacy (deprecated):** `data/{category}/{exchange}/{symbol}/{day}.parquet` — daily rollup from old converter.
 
