@@ -32,6 +32,11 @@ MERGED_ROW_GROUP_SIZE = 100_000
 MERGED_SOURCES_METADATA_KEY = b"normalizer.raw_sources"
 MERGED_MODE_METADATA_KEY = b"normalizer.batch_mode"
 
+# The one-off archive merge tool writes archive-relative paths under its own
+# key, so the normalizer's crash recovery never mistakes an archive output for
+# a project batch (``normalizer.merged.recover_orphaned_merged_batches``).
+ARCHIVE_MERGE_SOURCES_METADATA_KEY = b"archive.merge_sources"
+
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 _INT64_MAX_PLUS_ONE = Decimal(_INT64_MAX) + 1

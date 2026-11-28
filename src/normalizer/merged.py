@@ -24,6 +24,11 @@ know about. The next turn scans the affected day directories, reads the footer
 of merged files state does not reference, and re-adopts their sources instead
 of re-normalizing them into a second file (which would duplicate rows). Files
 without that metadata are ignored, never adopted.
+
+Archive merge outputs from the one-off ``scripts/merge_archive_hourly.py`` use
+``archive.merge_sources`` instead, with paths relative to the archive root.
+They are not normalizer batches: crash recovery skips them without a warning,
+so writing an archive under a directory the normalizer scans adds no log noise.
 """
 
 from __future__ import annotations
@@ -37,7 +42,11 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from normalizer.paths import relative_to_project
-from normalizer.writer import MERGED_ROW_GROUP_SIZE, MERGED_SOURCES_METADATA_KEY
+from normalizer.writer import (
+    ARCHIVE_MERGE_SOURCES_METADATA_KEY,
+    MERGED_ROW_GROUP_SIZE,
+    MERGED_SOURCES_METADATA_KEY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +108,14 @@ def read_merged_sources(path: Path) -> list[str] | None:
     return sources
 
 
+def _has_archive_merge_sources(path: Path) -> bool:
+    try:
+        metadata = pq.read_metadata(path).metadata or {}
+    except Exception:
+        return False
+    return ARCHIVE_MERGE_SOURCES_METADATA_KEY in metadata
+
+
 def recover_orphaned_merged_batches(
     *,
     data_day_dir: Path,
@@ -131,6 +148,8 @@ def recover_orphaned_merged_batches(
             continue
 
         sources = read_merged_sources(path)
+        if sources is None and _has_archive_merge_sources(path):
+            continue
         if not sources:
             logger.warning(
                 "Merged parquet without raw-source metadata was not adopted: %s",

@@ -38,6 +38,7 @@ Optional future tiers (derived, knowledge, agent) are under `archive/tier2/` —
 | `src/normalize_parquet.py` | Normalizer CLI (`--once` / `--loop`) on `:9101` |
 | `src/normalizer/` | Arrow parquet writer, schemas, paths, runner (1 JSONL → 1 parquet by default; optional per-turn merged batches) |
 | `src/rollup_parquet.py` | Derived rollup layer (`data_rollup/`, hourly + daily) — read-only on `data/` |
+| `scripts/merge_archive_hourly.py` | One-off per-minute → hourly archive merge (dry-run default; separate `--out`) |
 | `src/convert_parquet.py` | **Deprecated** — delegates to `normalize_parquet.py` |
 | `archive/tier2/` | Derived, knowledge, agent, catalog, coverage, quality (not runtime) |
 | `src/polymarket/discovery.py` | Gamma API — active BTC 15m market |
@@ -75,6 +76,21 @@ data/{category}/{exchange}/{symbol}/{day}.parquet             # legacy daily rol
 data_rollup/hourly/{category}/{exchange}/{symbol}/{date}/{HH}.parquet   # derived, last N days
 data_rollup/daily/{category}/{exchange}/{symbol}/{date}.parquet         # derived, all history
 ```
+
+`scripts/merge_archive_hourly.py` can consolidate an existing per-minute archive
+into the merged hourly layout under a separate `--out` root. Point it at the
+directory whose direct children are the category directories (for example the
+live `data/` root or a copy), so the layout is
+`<root>/<category>/<exchange>/<symbol>/<YYYY-MM-DD>/<HH-MM-SS>.parquet`; a
+category directory such as `trades/` or a parent that wraps several archives is
+not a source root, and a root without day directories fails instead of reporting
+a successful no-op. It is an archive migration, not the normalizer or the
+derived rollup layer: the default is a dry run, sources are read-only, outputs
+are verified against their source row counts before publication, and valid
+existing outputs are reused. **Stop the normalizer before an `--apply` run whose
+`--out` is (or is inside) its data root**, because a batch written after the
+hour snapshot would be replaced. See `README.md`
+(*One-off hourly merge of a per-minute archive*).
 
 `data_rollup/` is a **derived read layer** built by `src/rollup_parquet.py` — never
 the source of truth, never written by the normalizer, safe to delete and rebuild
