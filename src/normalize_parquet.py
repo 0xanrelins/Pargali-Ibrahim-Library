@@ -7,6 +7,7 @@ import argparse
 import logging
 import signal
 import time
+from datetime import UTC, datetime
 
 from metrics.exporter import DEFAULT_PIPELINE_METRICS_PORT, start_exporter
 from metrics.storage_scanner import collect_storage_metrics, start_storage_poller
@@ -18,9 +19,12 @@ from normalizer.raw_retention import (
     RawRetentionScheduler,
 )
 from normalizer.runner import (
+    SLEEP_MODE_HOUR,
     normalize_once,
     resolve_batch_mode,
     resolve_interval_sec,
+    resolve_sleep_mode,
+    seconds_until_next_hour,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,7 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
     global stop_requested
 
     interval_sec = resolve_interval_sec()
+    sleep_mode = resolve_sleep_mode()
     batch_mode = resolve_batch_mode()
 
     signal.signal(signal.SIGINT, request_stop)
@@ -77,8 +82,9 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
             retention_config.interval_sec,
         )
     logger.info(
-        "Starting normalizer loop (interval=%ss, batch_mode=%s)",
+        "Starting normalizer loop (interval=%ss, sleep_mode=%s, batch_mode=%s)",
         interval_sec,
+        sleep_mode,
         batch_mode,
     )
 
@@ -94,8 +100,13 @@ def run_loop(*, retention_config: RawRetentionConfig) -> None:
             if stop_requested:
                 break
 
-            logger.info("Next normalize batch in %s seconds", interval_sec)
-            sleep_until_stop(interval_sec)
+            if sleep_mode == SLEEP_MODE_HOUR:
+                sleep_sec = seconds_until_next_hour(datetime.now(UTC))
+            else:
+                sleep_sec = interval_sec
+
+            logger.info("Next normalize batch in %s seconds", sleep_sec)
+            sleep_until_stop(sleep_sec)
     finally:
         storage_poller.stop()
 
@@ -161,11 +172,12 @@ def main() -> int:
 
     parser = build_parser()
     args = parser.parse_args()
-    # Validate NORMALIZE_BATCH_MODE and NORMALIZE_INTERVAL_SEC before touching
-    # any data: an unknown value must fail loudly at startup, never silently
-    # pick a mode or interval.
+    # Validate NORMALIZE_BATCH_MODE, NORMALIZE_INTERVAL_SEC and
+    # NORMALIZE_SLEEP_MODE before touching any data: an unknown value must
+    # fail loudly at startup, never silently pick a mode or interval.
     resolve_batch_mode()
     resolve_interval_sec()
+    resolve_sleep_mode()
     retention_config = retention_config_from_args(args)
 
     if args.loop:

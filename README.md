@@ -123,6 +123,7 @@ cd "/path/to/Pargali-Ibrahim-Library"
 | One-shot normalize | `./venv/bin/python src/normalize_parquet.py --once` |
 | Normalizer loop | `./venv/bin/python -u src/normalize_parquet.py --loop` |
 | Normalizer loop, custom interval | `NORMALIZE_INTERVAL_SEC=3600 ./venv/bin/python -u src/normalize_parquet.py --loop` (default 300s) |
+| Normalizer loop, hour-aligned turns | `NORMALIZE_SLEEP_MODE=hour ./venv/bin/python -u src/normalize_parquet.py --loop` (sleeps to 5s past the next UTC hour; use with `NORMALIZE_BATCH_MODE=merged`) |
 | Normalizer loop, merged batches | `NORMALIZE_BATCH_MODE=merged ./venv/bin/python -u src/normalize_parquet.py --loop` |
 | Rollup pass (timer) | `./venv/bin/python src/rollup_parquet.py --run` |
 | Rollup rebuild (all history) | `./venv/bin/python src/rollup_parquet.py --backfill` |

@@ -7,6 +7,7 @@ import math
 import os
 import time
 from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -58,8 +59,6 @@ logger = logging.getLogger(__name__)
 # backlog latency at a few minutes while cutting the fixed cost 5x, and gives
 # each turn enough files to make merged batches worthwhile.
 DEFAULT_NORMALIZE_INTERVAL_SEC = 300.0
-# Backward-compatible alias for callers that still import the old constant.
-NORMALIZE_INTERVAL_SEC = DEFAULT_NORMALIZE_INTERVAL_SEC
 
 INTERVAL_ENV = "NORMALIZE_INTERVAL_SEC"
 # A week is generous for a deployment cadence and still rejects unit mistakes
@@ -71,6 +70,16 @@ BATCH_MODE_PER_FILE = "per_file"
 BATCH_MODE_MERGED = "merged"
 DEFAULT_BATCH_MODE = BATCH_MODE_PER_FILE
 BATCH_MODES = (BATCH_MODE_PER_FILE, BATCH_MODE_MERGED)
+
+SLEEP_MODE_ENV = "NORMALIZE_SLEEP_MODE"
+SLEEP_MODE_INTERVAL = "interval"
+SLEEP_MODE_HOUR = "hour"
+DEFAULT_SLEEP_MODE = SLEEP_MODE_INTERVAL
+SLEEP_MODES = (SLEEP_MODE_INTERVAL, SLEEP_MODE_HOUR)
+# Collectors flush raw files on a 60 s timer and stamp the file when the
+# flush runs, so the file covering HH:59:xx can land just after the hour
+# turns. Five seconds let that last file finish before the next turn scans.
+HOUR_SLEEP_MARGIN_SEC = 5.0
 
 
 def resolve_batch_mode(environ: Mapping[str, str] | None = None) -> str:
@@ -86,10 +95,33 @@ def resolve_batch_mode(environ: Mapping[str, str] | None = None) -> str:
     return value
 
 
+def resolve_sleep_mode(environ: Mapping[str, str] | None = None) -> str:
+    """Read ``NORMALIZE_SLEEP_MODE``; missing means the historical interval sleep."""
+    raw_value = (environ if environ is not None else os.environ).get(SLEEP_MODE_ENV, "")
+    value = raw_value.strip().lower()
+    if not value:
+        return DEFAULT_SLEEP_MODE
+    if value not in SLEEP_MODES:
+        raise ValueError(
+            f"{SLEEP_MODE_ENV} must be one of {SLEEP_MODES}, got {raw_value!r}"
+        )
+    return value
+
+
+def seconds_until_next_hour(now: datetime) -> float:
+    """Seconds from ``now`` until the next UTC hour plus the raw-flush margin.
+
+    A turn that finishes exactly on the hour targets the following boundary,
+    never a zero-length sleep.
+    """
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return (next_hour - now).total_seconds() + HOUR_SLEEP_MARGIN_SEC
+
+
 def resolve_interval_sec(environ: Mapping[str, str] | None = None) -> float:
-    """Read ``NORMALIZE_INTERVAL_SEC``; missing means the historical five-minute loop."""
+    """Read ``NORMALIZE_INTERVAL_SEC``; missing or blank means the historical five-minute loop."""
     raw_value = (environ if environ is not None else os.environ).get(INTERVAL_ENV)
-    if raw_value is None:
+    if raw_value is None or not raw_value.strip():
         return DEFAULT_NORMALIZE_INTERVAL_SEC
     message = (
         f"{INTERVAL_ENV} must be a positive number of seconds up to "

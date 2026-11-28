@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -29,10 +30,17 @@ from normalizer.runner import (
     BATCH_MODE_MERGED,
     BATCH_MODE_PER_FILE,
     DEFAULT_NORMALIZE_INTERVAL_SEC,
+    DEFAULT_SLEEP_MODE,
+    HOUR_SLEEP_MARGIN_SEC,
     INTERVAL_ENV,
     MAX_NORMALIZE_INTERVAL_SEC,
+    SLEEP_MODE_ENV,
+    SLEEP_MODE_HOUR,
+    SLEEP_MODE_INTERVAL,
     resolve_batch_mode,
     resolve_interval_sec,
+    resolve_sleep_mode,
+    seconds_until_next_hour,
 )
 from normalizer.state import ProcessedState, load_processed_state, save_processed_state
 from normalizer.tokens import invalidate_polymarket_outcome_batches
@@ -239,8 +247,14 @@ class BatchModeTests(unittest.TestCase):
 class IntervalTests(unittest.TestCase):
     def test_default_is_five_minutes(self) -> None:
         self.assertEqual(resolve_interval_sec({}), DEFAULT_NORMALIZE_INTERVAL_SEC)
+        self.assertEqual(
+            resolve_interval_sec({INTERVAL_ENV: ""}), DEFAULT_NORMALIZE_INTERVAL_SEC
+        )
+        self.assertEqual(
+            resolve_interval_sec({INTERVAL_ENV: "   "}), DEFAULT_NORMALIZE_INTERVAL_SEC
+        )
         self.assertEqual(DEFAULT_NORMALIZE_INTERVAL_SEC, 300)
-        self.assertEqual(runner.NORMALIZE_INTERVAL_SEC, DEFAULT_NORMALIZE_INTERVAL_SEC)
+        self.assertFalse(hasattr(runner, "NORMALIZE_INTERVAL_SEC"))
 
     def test_valid_value_is_returned(self) -> None:
         self.assertEqual(resolve_interval_sec({INTERVAL_ENV: "3600"}), 3600)
@@ -251,8 +265,6 @@ class IntervalTests(unittest.TestCase):
             "0",
             "-5",
             "abc",
-            "",
-            "   ",
             "nan",
             "inf",
             str(MAX_NORMALIZE_INTERVAL_SEC + 1),
@@ -277,7 +289,11 @@ class IntervalTests(unittest.TestCase):
 
         poller = mock.Mock()
         with (
-            mock.patch.dict(os.environ, {INTERVAL_ENV: "900"}, clear=False),
+            mock.patch.dict(
+                os.environ,
+                {INTERVAL_ENV: "900", SLEEP_MODE_ENV: SLEEP_MODE_INTERVAL},
+                clear=False,
+            ),
             mock.patch.object(cli, "normalize_once", return_value={}),
             mock.patch.object(cli, "log_stats"),
             mock.patch.object(cli, "start_exporter"),
@@ -301,6 +317,111 @@ class IntervalTests(unittest.TestCase):
 
         with (
             mock.patch.dict(os.environ, {INTERVAL_ENV: "0"}, clear=False),
+            mock.patch.object(cli, "project_paths") as project_paths,
+            self.assertRaises(ValueError),
+        ):
+            cli.run_loop(retention_config=RawRetentionConfig())
+
+        project_paths.assert_not_called()
+
+
+class SleepModeTests(unittest.TestCase):
+    def test_default_is_interval(self) -> None:
+        self.assertEqual(resolve_sleep_mode({}), SLEEP_MODE_INTERVAL)
+        self.assertEqual(
+            resolve_sleep_mode({SLEEP_MODE_ENV: "  "}), SLEEP_MODE_INTERVAL
+        )
+        self.assertEqual(runner.DEFAULT_SLEEP_MODE, SLEEP_MODE_INTERVAL)
+
+    def test_explicit_modes_and_case(self) -> None:
+        self.assertEqual(
+            resolve_sleep_mode({SLEEP_MODE_ENV: "hour"}), SLEEP_MODE_HOUR
+        )
+        self.assertEqual(
+            resolve_sleep_mode({SLEEP_MODE_ENV: " INTERVAL "}), SLEEP_MODE_INTERVAL
+        )
+
+    def test_unknown_mode_fails_loudly(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            resolve_sleep_mode({SLEEP_MODE_ENV: "daily"})
+        message = str(raised.exception)
+        self.assertIn(SLEEP_MODE_ENV, message)
+        self.assertIn("'daily'", message)
+
+    def test_hour_boundary_math(self) -> None:
+        cases = {
+            datetime(2026, 8, 14, 0, 0, 3, tzinfo=UTC): 3602.0,
+            datetime(2026, 8, 14, 0, 37, 12, tzinfo=UTC): 1373.0,
+            datetime(2026, 8, 14, 0, 59, 58, tzinfo=UTC): 7.0,
+            datetime(2026, 8, 14, 1, 0, 0, tzinfo=UTC): 3605.0,
+        }
+        for now, expected in cases.items():
+            with self.subTest(now=now):
+                self.assertEqual(seconds_until_next_hour(now), expected)
+
+    def test_hour_sleep_respects_the_margin_and_next_boundary(self) -> None:
+        for now in (
+            datetime(2026, 8, 14, 0, 0, 3, tzinfo=UTC),
+            datetime(2026, 8, 14, 0, 37, 12, tzinfo=UTC),
+            datetime(2026, 8, 14, 0, 59, 58, tzinfo=UTC),
+        ):
+            with self.subTest(now=now):
+                sleep_sec = seconds_until_next_hour(now)
+                next_boundary = now.replace(
+                    minute=0, second=0, microsecond=0
+                ) + timedelta(hours=1)
+                target = now + timedelta(seconds=sleep_sec)
+                self.assertGreaterEqual(sleep_sec, HOUR_SLEEP_MARGIN_SEC)
+                self.assertEqual(
+                    target,
+                    next_boundary + timedelta(seconds=HOUR_SLEEP_MARGIN_SEC),
+                )
+
+    def test_loop_sleeps_until_next_hour_in_hour_mode(self) -> None:
+        import normalize_parquet as cli
+
+        from normalizer.raw_retention import RawRetentionConfig
+
+        sleeps: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            cli.stop_requested = True
+
+        poller = mock.Mock()
+        with (
+            mock.patch.dict(
+                os.environ,
+                {INTERVAL_ENV: "900", SLEEP_MODE_ENV: SLEEP_MODE_HOUR},
+                clear=False,
+            ),
+            mock.patch.object(cli, "normalize_once", return_value={}),
+            mock.patch.object(cli, "log_stats"),
+            mock.patch.object(cli, "start_exporter"),
+            mock.patch.object(cli, "start_storage_poller", return_value=poller),
+            mock.patch.object(
+                cli, "seconds_until_next_hour", return_value=7.0
+            ) as boundary_math,
+            mock.patch.object(cli, "sleep_until_stop", side_effect=fake_sleep),
+            mock.patch.object(cli.signal, "signal"),
+        ):
+            cli.stop_requested = False
+            try:
+                cli.run_loop(retention_config=RawRetentionConfig())
+            finally:
+                cli.stop_requested = False
+
+        boundary_math.assert_called_once()
+        poller.stop.assert_called_once()
+        self.assertEqual(sleeps, [7.0])
+
+    def test_loop_rejects_an_invalid_sleep_mode_before_touching_data(self) -> None:
+        import normalize_parquet as cli
+
+        from normalizer.raw_retention import RawRetentionConfig
+
+        with (
+            mock.patch.dict(os.environ, {SLEEP_MODE_ENV: "daily"}, clear=False),
             mock.patch.object(cli, "project_paths") as project_paths,
             self.assertRaises(ValueError),
         ):
