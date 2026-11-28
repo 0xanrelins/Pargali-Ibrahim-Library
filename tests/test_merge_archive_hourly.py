@@ -7,6 +7,7 @@ archive directory is touched.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import sys
@@ -14,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Sequence
+from unittest import mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -22,9 +24,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "src"))
 
-from merge_archive_hourly import main  # noqa: E402
+import merge_archive_hourly  # noqa: E402
+from merge_archive_hourly import (  # noqa: E402
+    LOCK_NAME,
+    append_report_entry,
+    main,
+)
 from normalizer.merged import MERGED_BATCH_PATTERN, MERGED_NAME_SEPARATOR  # noqa: E402
-from normalizer.writer import MERGED_SOURCES_METADATA_KEY  # noqa: E402
+from normalizer.writer import ARCHIVE_MERGE_SOURCES_METADATA_KEY  # noqa: E402
 
 DAY = "2026-01-01"
 DATASET = Path("trades/binance_futures/BTCUSDT")
@@ -73,12 +80,22 @@ class ArchiveMergeTest(unittest.TestCase):
         return self.out / dataset / day / name
 
     def run_tool(
-        self, *arguments: str, out: Path | None = None
+        self,
+        *arguments: str,
+        out: Path | None = None,
+        source: Path | None = None,
     ) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            code = main([str(self.source), "--out", str(out or self.out), *arguments])
+            code = main(
+                [
+                    str(source or self.source),
+                    "--out",
+                    str(out or self.out),
+                    *arguments,
+                ]
+            )
         return code, stdout.getvalue(), stderr.getvalue()
 
     def report_entries(self) -> dict[str, dict[str, object]]:
@@ -128,7 +145,7 @@ class ArchiveMergeTest(unittest.TestCase):
 
         metadata = pq.read_metadata(first).metadata or {}
         self.assertEqual(
-            json.loads(metadata[MERGED_SOURCES_METADATA_KEY]),
+            json.loads(metadata[ARCHIVE_MERGE_SOURCES_METADATA_KEY]),
             [
                 f"trades/binance_futures/BTCUSDT/{DAY}/09-00-00.parquet",
                 f"trades/binance_futures/BTCUSDT/{DAY}/09-15-00.parquet",
@@ -186,6 +203,67 @@ class ArchiveMergeTest(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertFalse(self.out.exists())
         self.assertIn("would write", stdout)
+
+    def test_a_wrong_source_root_fails_instead_of_reporting_a_successful_no_op(self) -> None:
+        self.write_source("09-00-00", [trade_row(1, 1.0, "BUY")])
+        category_root = self.source / "trades"
+
+        code, _, stderr = self.run_tool("--apply", source=category_root)
+
+        self.assertEqual(code, 1)
+        self.assertIn("no day directories found", stderr)
+        self.assertIn(str(category_root.resolve()), stderr)
+        self.assertIn("<category>/<exchange>/<symbol>/<YYYY-MM-DD>", stderr)
+        self.assertFalse(self.out.exists())
+
+    def test_dropped_source_rows_are_caught_before_publish(self) -> None:
+        self.write_source(
+            "09-00-00",
+            [trade_row(1, 1.0, "BUY"), trade_row(2, 2.0, "SELL")],
+        )
+        original = merge_archive_hourly.read_source_meta
+
+        def read_then_drop_a_row(source):
+            meta = original(source)
+            table = pq.read_table(source.path)
+            pq.write_table(table.slice(0, table.num_rows - 1), source.path)
+            return meta
+
+        with mock.patch.object(
+            merge_archive_hourly,
+            "read_source_meta",
+            side_effect=read_then_drop_a_row,
+        ):
+            code, _, stderr = self.run_tool("--apply")
+
+        self.assertEqual(code, 1)
+        self.assertIn("row count mismatch", stderr)
+        self.assertFalse(self.target("09-00-00--09-00-00.parquet").exists())
+
+    def test_apply_refuses_a_second_run_holding_the_output_lock(self) -> None:
+        self.write_source("09-00-00", [trade_row(1, 1.0, "BUY")])
+        self.out.mkdir(parents=True)
+        lock_path = self.out / LOCK_NAME
+
+        with lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, _, stderr = self.run_tool("--apply")
+
+        self.assertEqual(code, 1)
+        self.assertIn("already working", stderr)
+        self.assertFalse(self.target("09-00-00--09-00-00.parquet").exists())
+
+    def test_report_append_repairs_a_partial_trailing_line(self) -> None:
+        report = self.out / "_merge_report.jsonl"
+        report.parent.mkdir(parents=True)
+        report.write_text('{"target":"first"}\n{"target":"partial"', encoding="utf-8")
+
+        append_report_entry(report, {"target": "second"})
+
+        lines = report.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            [json.loads(line)["target"] for line in lines], ["first", "second"]
+        )
 
     def test_second_apply_run_reuses_outputs_and_leaves_the_report_alone(self) -> None:
         self.write_source("09-00-00", [trade_row(1, 1.0, "BUY")])

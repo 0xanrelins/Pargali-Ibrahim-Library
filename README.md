@@ -184,16 +184,26 @@ data/{category}/{exchange}/{symbol}/{date}/{first}--{last}.parquet
 files into the merged hourly layout without touching the sources:
 
 ```
-<source>/<category>/<exchange>/<symbol>/<date>/<HH-MM-SS>.parquet
-  -> <out>/<category>/<exchange>/<symbol>/<date>/<first>--<last>.parquet
+<source-root>/<category>/<exchange>/<symbol>/<date>/<HH-MM-SS>.parquet
+  -> <out-root>/<category>/<exchange>/<symbol>/<date>/<first>--<last>.parquet
 ```
 
 One output per hour of the file stamps; rows and columns keep source file order
 (no sort). `<source-root>` is the directory whose direct children are the
-category directories (for example `trades/`); it is not a parent folder that
-wraps several separate archives. Run the tool once per such root, reusing the
-same `--out` if the outputs belong together. The command is a dry run unless
-`--apply` is passed:
+category directories (the live `data/` root, or a copy of it), so the expected
+layout is exactly
+`<source-root>/<category>/<exchange>/<symbol>/<YYYY-MM-DD>/<HH-MM-SS>.parquet`.
+It is not a category directory such as `trades/`, and not a parent folder that
+wraps several separate archives; a root with no day directories exits non-zero
+and names the given root and this layout. Run the tool once per such root,
+reusing the same `--out` if the outputs belong together. The command is a dry
+run unless `--apply` is passed:
+
+> **Stop the normalizer first.** `--apply` publishes by replacing files at their
+> target names under `--out`. If `--out` is, or is inside, the live `data/`
+> root, a normalizer batch written after the hour was scanned would be silently
+> replaced. Stop `src/normalize_parquet.py` before an `--apply` run that touches
+> its data root, or write to a separate root.
 
 ```bash
 ./venv/bin/python scripts/merge_archive_hourly.py "<source-root>" --out "<out-root>"          # preview
@@ -202,16 +212,20 @@ same `--out` if the outputs belong together. The command is a dry run unless
 
 - Sources are read-only; the output must be a separate root (overlap is refused).
 - Outputs are written atomically with DuckDB `COPY`, ZSTD compression and row
-  groups capped at `MERGED_ROW_GROUP_SIZE`. Existing valid outputs are reused, so
-  a second run is a no-op. An output whose row count, schema or recorded source
-  set no longer matches is left untouched and stops the run; the tool never
-  creates a second file for the same hour.
+  groups capped at `MERGED_ROW_GROUP_SIZE`: a unique temporary file per hour,
+  fsync of the file and then of its directory around the rename. `--apply` holds
+  an exclusive lock on the output root, so a second run refuses to start.
+  Existing valid outputs are reused, so a second run is a no-op. An output whose
+  row count, schema or recorded source set no longer matches is left untouched
+  and stops the run; the tool never creates a second file for the same hour.
 - Every output is verified against the sum of its sources before it is published.
   Zero-row sources contribute zero rows; an all-empty hour still produces a valid
   empty parquet file.
-- `normalizer.raw_sources` footer metadata records the source files; per-output
-  rows, sources and `timestamp`/`event_time` bounds are recorded in
-  `_merge_report.jsonl` under the output root.
+- `archive.merge_sources` footer metadata records the source files (distinct from
+  the normalizer's `normalizer.raw_sources`, which crash recovery only reads from
+  project batches); per-output rows, sources and `timestamp`/`event_time` bounds
+  are appended to `_merge_report.jsonl` under the output root as each hour
+  completes.
 - Progress is one line per completed hour; the final `SUMMARY` line reports days,
   hours, files in/out, bytes in/out and failures.
 

@@ -24,11 +24,16 @@ from normalizer.merged import (
     merged_batch_path,
     merged_batch_stamps,
     read_merged_sources,
+    recover_orphaned_merged_batches,
 )
 from normalizer.runner import BATCH_MODE_MERGED, BATCH_MODE_PER_FILE, resolve_batch_mode
 from normalizer.state import ProcessedState, load_processed_state, save_processed_state
 from normalizer.tokens import invalidate_polymarket_outcome_batches
-from normalizer.writer import MERGED_ROW_GROUP_SIZE, write_merged_parquet_batch
+from normalizer.writer import (
+    ARCHIVE_MERGE_SOURCES_METADATA_KEY,
+    MERGED_ROW_GROUP_SIZE,
+    write_merged_parquet_batch,
+)
 from parse_polymarket import OutcomeTokenRegistry
 
 DATE = "2026-08-14"
@@ -421,6 +426,30 @@ class MergedBatchEndToEndTests(NormalizerProjectTestCase):
 
 
 class MergedBatchCrashRecoveryTests(NormalizerProjectTestCase):
+    def test_archive_merge_output_is_ignored_without_a_warning(self) -> None:
+        day_dir = self.data_root / "trades" / BINANCE_FUTURES / SYMBOL / DATE
+        day_dir.mkdir(parents=True)
+        archive = day_dir / "00-00-00--00-59-59.parquet"
+        table = pa.table({"timestamp": [1]})
+        metadata = dict(table.schema.metadata or {})
+        metadata[ARCHIVE_MERGE_SOURCES_METADATA_KEY] = b'["trades/binance"]'
+        pq.write_table(table.replace_schema_metadata(metadata), archive)
+        processed: set[str] = set()
+        batches: dict[str, str] = {}
+
+        with self.assertNoLogs("normalizer.merged", level="WARNING"):
+            adopted = recover_orphaned_merged_batches(
+                data_day_dir=day_dir,
+                raw_day_dir=self.root / "raw" / BINANCE_FUTURES / "trades" / DATE,
+                project_root=self.root,
+                processed_files=processed,
+                batches=batches,
+            )
+
+        self.assertEqual(adopted, [])
+        self.assertEqual(processed, set())
+        self.assertEqual(batches, {})
+
     def test_published_batch_without_state_is_adopted_not_rewritten(self) -> None:
         for index, stamp in enumerate(("00-00-00", "00-01-00", "00-02-00")):
             write_raw(self.root, "trades", stamp, start_index=index * 10)

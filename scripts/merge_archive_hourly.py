@@ -19,18 +19,29 @@ files are only ever read. An existing output is reused when its row count,
 schema and recorded source list match the sources; otherwise the run stops and
 leaves it untouched.
 
-Every output carries ``normalizer.raw_sources`` footer metadata (source paths
-relative to ``--source``) and a JSONL report is kept under the output root.
+Every output carries ``archive.merge_sources`` footer metadata (source paths
+relative to ``--source``). That key is deliberately separate from the
+normalizer's ``normalizer.raw_sources``: these paths are archive-relative, not
+project-relative, and the normalizer's crash recovery must not adopt them.
+A JSONL report is appended one line per completed hour under the output root.
+
+``--apply`` holds an exclusive lock on the output root, writes each hour to a
+unique temporary file, fsyncs it, renames it into place and fsyncs the
+directory. Stop the normalizer before an ``--apply`` run whose ``--out`` is (or
+is inside) its data root: a batch the normalizer creates after this tool's hour
+snapshot would be silently replaced.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
 import os
 import re
 import sys
+import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -48,12 +59,14 @@ from normalizer.merged import (  # noqa: E402
     MERGED_NAME_SEPARATOR,
     MERGED_ROW_GROUP_SIZE,
 )
-from normalizer.writer import MERGED_SOURCES_METADATA_KEY  # noqa: E402
+from normalizer.writer import ARCHIVE_MERGE_SOURCES_METADATA_KEY  # noqa: E402
 
 logger = logging.getLogger("merge_archive_hourly")
 
 REPORT_NAME = "_merge_report.jsonl"
+LOCK_NAME = "_merge.lock"
 TEMP_SUFFIX = ".tmp"
+ARCHIVE_MERGE_SOURCES_KEY = ARCHIVE_MERGE_SOURCES_METADATA_KEY.decode("utf-8")
 DAY_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SOURCE_STAMP_PATTERN = re.compile(r"^(?P<stamp>\d{2}-\d{2}-\d{2})\.parquet$")
 TIME_COLUMN_CANDIDATES: tuple[str, ...] = ("timestamp", "event_time")
@@ -123,6 +136,7 @@ class HourGroup:
 
 @dataclass
 class Stats:
+    day_dirs: int = 0
     days: int = 0
     hours: int = 0
     written: int = 0
@@ -260,6 +274,7 @@ def scan_source_tree(source_root: Path, stats: Stats) -> Iterator[DayBatch]:
                 for day_dir in _subdirs(symbol_dir, boundary=source_root):
                     day = day_dir.name
                     _validate_day_name(day, day_dir)
+                    stats.day_dirs += 1
                     sources = _scan_day(day_dir, source_root=source_root, stats=stats)
                     if sources:
                         yield DayBatch(
@@ -422,6 +437,63 @@ def _sql_path_list(paths: Sequence[Path]) -> str:
     return "[" + ", ".join(_sql_literal(str(path)) for path in paths) + "]"
 
 
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+class OutputLock:
+    """Exclusive lock for one output root, released by the kernel on process exit.
+
+    ``flock`` is used instead of a pid file so a killed run never leaves a stale
+    lock behind. The lock file itself stays in place between runs.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.path = root / LOCK_NAME
+        self._descriptor: int | None = None
+
+    def acquire(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as exc:
+            raise MergeError(f"cannot create output lock {self.path}: {exc}") from exc
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(descriptor)
+            raise MergeError(
+                f"another merge_archive_hourly run is already working in {self.root}; "
+                f"lock file: {self.path}"
+            ) from exc
+        os.ftruncate(descriptor, 0)
+        os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
+        self._descriptor = descriptor
+
+    def release(self) -> None:
+        if self._descriptor is None:
+            return
+        try:
+            fcntl.flock(self._descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(self._descriptor)
+            self._descriptor = None
+
+
 def _duckdb_schema(
     connection: duckdb.DuckDBPyConnection, paths: Sequence[Path]
 ) -> tuple[tuple[str, str], ...]:
@@ -439,7 +511,7 @@ def _expected_sources(metas: Sequence[SourceMeta]) -> list[str]:
 
 def _read_recorded_sources(path: Path) -> list[str] | None:
     metadata = pq.read_metadata(path).metadata or {}
-    raw = metadata.get(MERGED_SOURCES_METADATA_KEY)
+    raw = metadata.get(ARCHIVE_MERGE_SOURCES_METADATA_KEY)
     if raw is None:
         return None
     try:
@@ -535,8 +607,9 @@ def write_hour(
 ) -> Path:
     target = out_root / group.relative_dir / group.target_name
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_name(target.name + TEMP_SUFFIX)
-    temp.unlink(missing_ok=True)
+    temp = target.with_name(
+        f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}{TEMP_SUFFIX}"
+    )
 
     source_paths = [meta.source.path for meta in metas]
     expected_schema = _duckdb_schema(connection, source_paths)
@@ -550,14 +623,18 @@ def write_hour(
         + _sql_literal(str(temp))
         + " (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE "
         + str(MERGED_ROW_GROUP_SIZE)
-        + ", KV_METADATA {\"normalizer.raw_sources\": "
+        + ", KV_METADATA {\""
+        + ARCHIVE_MERGE_SOURCES_KEY
+        + "\": "
         + _sql_literal(metadata_json)
         + "})"
     )
     try:
         connection.execute(sql)
         _verify_output(connection, temp, metas, expected_schema)
+        _fsync_file(temp)
         os.replace(temp, target)
+        _fsync_directory(target.parent)
     except BaseException:
         temp.unlink(missing_ok=True)
         raise
@@ -622,28 +699,42 @@ def load_report(path: Path) -> dict[str, dict[str, object]]:
     return entries
 
 
-def write_report(path: Path, entries: dict[str, dict[str, object]]) -> None:
-    if not entries:
-        return
-    text = "".join(
-        json.dumps(entries[target], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+def _truncate_incomplete_tail(handle) -> None:
+    """Drop a partial trailing line left by a crash during an append."""
+    handle.seek(0, os.SEEK_END)
+    position = handle.tell()
+    while position > 0:
+        start = max(0, position - 65536)
+        handle.seek(start)
+        chunk = handle.read(position - start)
+        newline = chunk.rfind(b"\n")
+        if newline != -1:
+            handle.truncate(start + newline + 1)
+            return
+        position = start
+    handle.truncate(0)
+
+
+def append_report_entry(path: Path, entry: dict[str, object]) -> None:
+    """Append one completed-hour line and make it durable before returning."""
+    line = (
+        json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         + "\n"
-        for target in sorted(entries)
     )
-    if path.is_file():
-        try:
-            if path.read_text(encoding="utf-8") == text:
-                return
-        except OSError:
-            pass
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + TEMP_SUFFIX)
-    try:
-        temp.write_text(text, encoding="utf-8")
-        os.replace(temp, path)
-    except BaseException:
-        temp.unlink(missing_ok=True)
-        raise
+    created = not path.exists()
+    with path.open("a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell():
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                _truncate_incomplete_tail(handle)
+        handle.seek(0, os.SEEK_END)
+        handle.write(line.encode("utf-8"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    if created:
+        _fsync_directory(path.parent)
 
 
 def _progress(group: HourGroup, metas: Sequence[SourceMeta], status: str) -> None:
@@ -680,14 +771,16 @@ def run(args: argparse.Namespace) -> Stats:
     stats = Stats()
     connection = duckdb.connect()
     connection.execute("SET preserve_insertion_order = true")
+    lock: OutputLock | None = None
 
     def finish() -> None:
-        if apply:
-            write_report(report_path, report_entries)
         _print_summary(stats, apply=apply)
 
     try:
         for day_batch in scan_source_tree(source_root, stats):
+            if apply and lock is None:
+                lock = OutputLock(out_root)
+                lock.acquire()
             stats.days += 1
             day_out_dir = (
                 out_root
@@ -727,7 +820,7 @@ def run(args: argparse.Namespace) -> Stats:
                         stats.reused += 1
                         stats.files_reused += 1
                         if target_relative not in report_entries:
-                            report_entries[target_relative] = _report_entry(
+                            entry = _report_entry(
                                 group,
                                 metas,
                                 sum(meta.rows for meta in metas),
@@ -735,6 +828,9 @@ def run(args: argparse.Namespace) -> Stats:
                                 status,
                                 target_relative=target_relative,
                             )
+                            report_entries[target_relative] = entry
+                            if apply:
+                                append_report_entry(report_path, entry)
                     elif apply:
                         target = write_hour(connection, group, metas, out_root)
                         output_bytes = target.stat().st_size
@@ -742,13 +838,15 @@ def run(args: argparse.Namespace) -> Stats:
                         stats.written += 1
                         stats.files_written += 1
                         stats.bytes_written += output_bytes
-                        report_entries[group.target_relative] = _report_entry(
+                        entry = _report_entry(
                             group,
                             metas,
                             sum(meta.rows for meta in metas),
                             output_bytes,
                             status,
                         )
+                        report_entries[group.target_relative] = entry
+                        append_report_entry(report_path, entry)
                     else:
                         output_bytes = 0
                         status = "would write"
@@ -767,14 +865,19 @@ def run(args: argparse.Namespace) -> Stats:
                     stats.files_out += 1
                     stats.bytes_out += output_bytes
                 _progress(group, metas, status)
+        if stats.day_dirs == 0:
+            raise MergeError(
+                f"no day directories found under {source_root}; expected "
+                "<category>/<exchange>/<symbol>/<YYYY-MM-DD>/<HH-MM-SS>.parquet "
+                "below that root"
+            )
     except Exception:
         stats.failures = max(stats.failures, 1)
-        try:
-            finish()
-        except Exception as report_exc:
-            print(f"ERROR: could not write report: {report_exc}", file=sys.stderr)
+        finish()
         raise
     finally:
+        if lock is not None:
+            lock.release()
         connection.close()
 
     finish()
@@ -785,19 +888,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Consolidate per-minute parquet files into hourly merged files "
-            "(dry run by default)."
-        )
+            "(dry run by default).\n\n"
+            "PRECONDITION: stop the normalizer before an --apply run whose --out\n"
+            "is, or is inside, its data root. This tool replaces files by name,\n"
+            "so a batch written after the hour snapshot would be lost."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "source",
         type=Path,
-        help="source archive root: <category>/<exchange>/<symbol>/<date>/<HH-MM-SS>.parquet",
+        help=(
+            "source archive root, whose direct children are the category "
+            "directories: <category>/<exchange>/<symbol>/<YYYY-MM-DD>/"
+            "<HH-MM-SS>.parquet"
+        ),
     )
     parser.add_argument(
         "--out",
         type=Path,
         required=True,
-        help="output root; must not overlap the source root",
+        help=(
+            "output root; must not overlap the source root; stop the normalizer "
+            "first if this is (or is inside) its data root"
+        ),
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
